@@ -367,6 +367,13 @@ def main(argv=None):
     if det is None:
         raise SystemExit("no paper found in the picture (is the toolhead in view?)")
     rect = inner_rect(det["corners_mm"], CAL_DOT_MARGIN_MM)
+    reach = (max(rect[0], S.MACHINE_X_MIN + 1), min(rect[1], S.MACHINE_X_MAX - 1),     # a sheet wider than the travel: only the
+             max(rect[2], S.MACHINE_Y_MIN + 1), min(rect[3], S.MACHINE_Y_MAX - 1))     # part the brush can reach gets dots
+    if reach != rect:
+        print(f"the paper reaches past the machine's travel: dots only in X {reach[0]:.0f}..{reach[1]:.0f}, Y {reach[2]:.0f}..{reach[3]:.0f}")
+        if reach[1] - reach[0] < 40 or reach[3] - reach[2] < 40:
+            raise SystemExit("too little of the paper is within reach for dots")
+        rect = reach
     dots = plan_dots(rect, CAL_DOTS_X, CAL_DOTS_Y)
     ux = sorted({round(p[0], 3) for p in dots})
     uy = sorted({round(p[1], 3) for p in dots})
