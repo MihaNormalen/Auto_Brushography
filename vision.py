@@ -745,11 +745,21 @@ def _roundness(filled):
     return float(filled.sum() / (math.pi * r * r))
 
 
-def find_pools(frame, H, exclude_poly_px=None, exclude_mm=15.0, min_area_mm2=100.0, open_mm=3.4):
-    """Pools of coloured paint anywhere in the picture OUTSIDE the paper (the polygon, widened by exclude_mm).
-    Saturated colour only: wood (orange, medium saturation) and small specks / splatter are ignored.
-    White, black and clear paints have no saturation and cannot be found this way.
-    Returns [{'center_px','center_mm','radius_mm','area_mm2','bgr','hue','sat'}] biggest first."""
+def _inner_radius_px(filled):
+    """The radius of the biggest circle that fits inside the pool: how far the brush may move from the centre while dipping.
+    For a round dish about its radius, for a square container half its side (the radius of a circle of the same area would
+    be 0.56 of the side and reach the wall)."""
+    return float(cv2.distanceTransform(filled.astype(np.uint8), cv2.DIST_L2, 5).max())
+
+
+def find_pools(frame, H, exclude_poly_px=None, exclude_mm=None, min_area_mm2=100.0, open_mm=3.4):
+    """Pools of paint (round dishes or square containers) anywhere in the picture OUTSIDE the paper (the polygon, widened by
+    exclude_mm, default POOL_PAPER_GAP_MM). Saturated colour, plus very dark pools (marked "dark", for black).
+    Wood (orange, medium saturation) and small specks / splatter are ignored. White and clear paints cannot be found this way.
+    Returns [{'center_px','center_mm','radius_mm','area_mm2','bgr','hue','sat'}] biggest first; radius_mm = the biggest circle inside."""
+    import settings as _S0
+    if exclude_mm is None:
+        exclude_mm = float(getattr(_S0, "POOL_PAPER_GAP_MM", 15.0))
     h, w = frame.shape[:2]
     mmpp = _mm_per_px(H, w / 2.0, h / 2.0)
     ppm = 1.0 / mmpp
@@ -825,14 +835,15 @@ def find_pools(frame, H, exclude_poly_px=None, exclude_mm=15.0, min_area_mm2=100
                 ys, xs = np.nonzero(filled)
                 cx, cy = float(xs.mean()), float(ys.mean())
                 mx, my = pixel_to_mm(H, cx, cy)
-                out.append({"center_px": (cx, cy), "center_mm": (mx, my), "radius_mm": math.sqrt(area_mm2 / math.pi),
+                out.append({"center_px": (cx, cy), "center_mm": (mx, my), "radius_mm": _inner_radius_px(filled) * mmpp,
                             "area_mm2": area_mm2, "bgr": [int(v) for v in np.median(frame[m], axis=0)],
                             "hue": circular_mean_hue(hh[m]), "sat": float(np.median(ss[m])),
                             "roundness": _roundness(filled)})
     # black (or very dark) paint: no colour to find, but much darker than anything else round on the table. Its glare (bright
     # reflections) is bridged; the pool is marked "dark" so only a black layer can use it
     import settings as _S2
-    dark = ((vv < int(getattr(_S2, "POOL_DARK_V", 70))) & (ss < 200)).astype(np.uint8) * 255
+    # (a nearly black pixel's saturation is noise - (5, 2, 3) is 150+ - so below V 30 it is not asked)
+    dark = ((vv < int(getattr(_S2, "POOL_DARK_V", 70))) & ((ss < 200) | (vv < 30))).astype(np.uint8) * 255
     if exclude_poly_px is not None:
         dark[exd] = 0
     # no bridging here (it would join the dish to dark rails and shadows next to it): a wide opening cuts thin dark connections
@@ -849,7 +860,7 @@ def find_pools(frame, H, exclude_poly_px=None, exclude_mm=15.0, min_area_mm2=100
         ys, xs = np.nonzero(filled)
         cx, cy = float(xs.mean()), float(ys.mean())
         mx, my = pixel_to_mm(H, cx, cy)
-        out.append({"center_px": (cx, cy), "center_mm": (mx, my), "radius_mm": math.sqrt(area_mm2 / math.pi),
+        out.append({"center_px": (cx, cy), "center_mm": (mx, my), "radius_mm": _inner_radius_px(filled) * mmpp,
                     "area_mm2": area_mm2, "bgr": [int(v) for v in np.median(frame[m], axis=0)],
                     "hue": circular_mean_hue(hh[m]), "sat": float(np.median(ss[m])), "dark": True,
                     "roundness": _roundness(filled)})

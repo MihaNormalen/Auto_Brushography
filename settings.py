@@ -117,6 +117,7 @@ PAINT_WIPE_R = 31.0        # the wipe point is this far from the dish centre, to
 PALETTE_RADIUS_MM = 200.0  # a paint dish must be within this distance of DIP_X / DIP_Y
 POOL_MIN_AREA_MM2 = 300.0  # smaller pools are specks, not dishes
 POOL_MIN_ROUNDNESS = 0.3
+POOL_PAPER_GAP_MM = 15.0   # paint closer than this to the paper is not taken for a dish (6 when the containers sit right at the paper)
 POOL_MIN_SAT_PASTEL = 35   # how colourful a light (pastel) paint in a dish must be to be found. Lower = paler paints found, more false dishes
 # colours of the ARTWORK: which pixels are a colour (own layer, own dish) and which are black
 DARK_CHROMA = 70.0         # a dark pixel with less colour than this (saturation x value / 255) is black, not a colour
