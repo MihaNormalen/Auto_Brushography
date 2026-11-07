@@ -747,7 +747,7 @@ def tool_offset_from_lines(D, H_inv, probes):
     A = np.array([n for _, n in vals])
     if len(vals) < 3:
         # PROBE_COUNT = 2: one vertical and one horizontal line give the shift exactly, but nothing checks it (scatter 0)
-        if len(vals) == 2 == len(probes) and abs(float(np.cross(A[0], A[1]))) > 0.7:
+        if len(vals) == 2 == len(probes) and abs(float(A[0][0] * A[1][1] - A[0][1] * A[1][0])) > 0.7:   # 2D cross product (np.cross refuses 2D vectors since NumPy 2)
             sol = np.linalg.solve(A, t)
             return [round(float(sol[0]), 3), round(float(sol[1]), 3)], 0.0
         # left + right (parallel, opposite normals): t_i = s * (n_i . u) + c gives the shift s across the lines (c = the common
