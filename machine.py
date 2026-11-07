@@ -139,6 +139,9 @@ class FluidNCLink(LerdgeSerial):
       M115       -> $I (firmware info)
       G4 P<ms>   -> G4 P<seconds> (Grbl's P is seconds)
       G28 <axes> -> $H<axes> if FLUIDNC_HOMING, else nothing: without limit switches the position FluidNC keeps is used
+      G0 / G1    -> G1 at the current feed (Marlin runs G0 at the feed too; FluidNC would run it at max rate), never faster
+                    than FLUIDNC_MAX_FEED: the small steppers lose steps at full speed (2026-11-07: 2.6 mm lost in two loops at
+                    2000 mm/min, nothing at 600)
     Every G0/G1 target outside MACHINE_LIMITS_MM is refused (like a firmware error): without limit switches nothing else stops
     the machine from running into its ends."""
 
@@ -150,6 +153,8 @@ class FluidNCLink(LerdgeSerial):
         self.limits = getattr(S, "MACHINE_LIMITS_MM", None)
         self.sock, self._buf = None, b""
         self._said_no_homing = False
+        self.max_feed = float(getattr(S, "FLUIDNC_MAX_FEED", None) or float("inf"))   # None = no cap
+        self.feed = min(self.max_feed, float(FEED_TRAVEL))   # the modal feed rate of the programs' G-code (mm/min)
 
     def connect(self):
         print(f"Connecting to FluidNC at {self.host}:{self.tcp_port}...")
@@ -262,11 +267,18 @@ class FluidNCLink(LerdgeSerial):
             return []
         if cmd == "G29":
             return []
-        if cmd in ("G0", "G1") and self.limits:
-            for ax, v in re.findall(r"([XYZ])(-?[\d.]+)", line.upper()):
-                lo, hi = self.limits[ax]
+        if cmd in ("G0", "G1"):
+            words = dict(re.findall(r"([XYZF])\s*(-?[\d.]+)", line.upper()))
+            if "F" in words:
+                self.feed = float(words.pop("F"))
+            if not words:
+                return []                            # only a new feed rate: remembered, sent with the next move
+            for ax, v in words.items():
+                lo, hi = self.limits[ax] if self.limits else (-1e9, 1e9)
                 if not lo <= float(v) <= hi:
                     return [f"<refuse>{ax} {float(v):.1f} is outside MACHINE_LIMITS_MM ({lo:g} to {hi:g}): {line}"]
+            axes = " ".join(f"{a}{words[a]}" for a in "XYZ" if a in words)
+            return [f"G1 {axes} F{min(self.feed, self.max_feed):g}"]
         return [line]
 
     def _send_raw(self, line, wait_ok=True, timeout=None):
