@@ -19,6 +19,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import paint as PT
+import settings as S
 import checkup as CU
 from vision import pixel_to_mm, px_to_mm_array, load_calibration
 from paint import RES
@@ -140,7 +141,7 @@ def main():
     def depth_z(w):
         """Machine Z for a centre-line mark of width w: the depth at which the real brush makes that width (as in the job)."""
         w = min(float(w), wmax)
-        return max(0.3, a.contact - float(np.interp(w, cw, cd)))      # never below the machine's Z limit (0.3)
+        return max(S.MACHINE_Z_MIN, a.contact - float(np.interp(w, cw, cd)))      # never below the machine's Z limit (MACHINE_Z_MIN)
     dip_blocks = CU.parse_strokes_full(open(a.job_gcode, encoding="utf-8", errors="ignore").read())[1]
     out = ["; ===== GAP REPAIR: only the gaps, each colour from its own dish =====",
            "G90", "G21", "M400"]

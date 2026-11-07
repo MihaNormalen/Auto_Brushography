@@ -58,7 +58,7 @@ PROBE_FILE = os.path.join(HERE, getattr(S, "PROBE_FILE", "probe_result.json"))  
 SHEET_FILE = os.path.join(HERE, "probe_sheet.json")             # where the last sheet was and how many probes it has had
 PROBE_OFFSET_MAX_MM = float(getattr(S, "PROBE_OFFSET_MAX_MM", 6.0))          # a measured tip offset larger than this is not used
 PROBE_OFFSET_SCATTER_MM = float(getattr(S, "PROBE_OFFSET_SCATTER_MM", 0.5))  # ... nor one where the lines disagree with the fit by more
-Z_MIN = 0.3                                                      # the machine is never sent below this Z
+Z_MIN = float(getattr(S, "MACHINE_Z_MIN", 0.3))                 # the machine is never sent below this Z (MACHINE_Z_MIN)
 
 
 # ------------------------------------------------------------------------------------------------ planning
@@ -575,7 +575,7 @@ def print_report(probes, results, sol, contact_guess):
             print(f"{r['name']:9s} {p['length']:6.0f}mm {p['z_start']:8.2f} {'-':>8s}   " + "; ".join(r["flags"]))
     if sol is None and sum(1 for r in results if r["ok"]) >= probes_needed():
         print("\nthe touch was found on every line, but not how the width grows with depth: below the touch the lines were too short "
-              "(the ramp ends at machine Z 0.3) or the brush ran out of paint. Mount the brush lower, so it touches higher up.")
+              "(the ramp ends at MACHINE_Z_MIN) or the brush ran out of paint. Mount the brush lower, so it touches higher up.")
     elif sol is None:
         print(f"\nnot enough good lines (at least {probes_needed()}) to say where the brush touches.")
         return
