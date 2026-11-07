@@ -27,7 +27,9 @@ The full illustrated walk-through is in [docs/system_workflow.pdf](docs/system_w
 
 ## Hardware
 
-- A 3-axis G-code machine (XY plotter with a Z axis) on a serial port, Marlin-style commands (`G0/G1`, `M204`, `M400`).
+- A 3-axis G-code machine (XY plotter with a Z axis): a FluidNC controller over WiFi (`MACHINE = "fluidnc"`,
+  `FLUIDNC_HOST`), or a Marlin-style one on a serial port (`MACHINE = "marlin"`). The programs write Marlin G-code; for
+  FluidNC it is translated while sending (`M400`, `M204`, `G4`, `G28`, see [machine.py](machine.py)).
 - A brush in the toolhead, paint dishes on the table beside the paper.
 - A camera above the table that sees the whole sheet and the dishes: a USB camera (1920×1080 used here) or a network
   camera stream (MJPEG over HTTP or RTSP, set `CAMERA_URL` in `settings.py`).
@@ -45,8 +47,8 @@ pip install -r requirements.txt
 All numbers live in **[settings.py](settings.py)**: serial port, camera, heights, speeds, dish positions, line and
 signature options. Every setting has a comment explaining it. Start with:
 
-- `SERIAL_PORT`, `CAMERA_URL` / `CAMERA_INDEX`: check with `python serial_test.py` and `python preview.py` (`--list` finds
-  USB cameras; `CAMERA_URL = None` uses the USB camera).
+- `MACHINE` + `FLUIDNC_HOST` (or `SERIAL_PORT`), `CAMERA_URL` / `CAMERA_INDEX`: check with `python serial_test.py` and
+  `python preview.py` (`--list` finds USB cameras; `CAMERA_URL = None` uses the USB camera).
 - `TOUCH_Z`: the machine Z where the brush tip touches the paper (rough; the probes measure it exactly).
 - `SIGNATURE`: a picture of your signature (black on white), or `None` for no signature.
 

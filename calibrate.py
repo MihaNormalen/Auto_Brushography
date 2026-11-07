@@ -143,8 +143,8 @@ def run_calibration(dry_run=False, gcode_out="registration_dots.gcode", no_draw=
         after = capture_frame(cap, flush=5); cap.release()
         cv2.imwrite("calibration_capture.png", after)
         solve_and_save(after, None); return
-    from machine import LerdgeSerial
-    with LerdgeSerial() as m:
+    from machine import Machine
+    with Machine() as m:
         for l in pre: m.send_line(l)
         m.wait_motion_complete()
         print("Photographing blank paper...")

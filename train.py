@@ -23,7 +23,7 @@ import numpy as np
 import brush_profile as BP
 import machine as _machine
 import settings as S
-from machine import LerdgeSerial, park
+from machine import Machine, park
 from monitor import MON, CameraStream
 from settings import (CANVAS_CORNERS_MM, FEED_TRAVEL, ACCEL_TRAVEL, X_OFFSET, Y_OFFSET, DIP_X, DIP_Y, DIP_Z, DIP_JITTER,
                       DIP_SPIRAL_LOOPS, DIP_SPIRAL_R, DIP_WIPE_R, Z_SAFE_DIP, Z_WIPE_TRAVEL, PLUNGE_FEED, PARK_X, PARK_Y)
@@ -458,7 +458,7 @@ def run_ladder_session(levels=None, repeats=None, length_mm=None, feed=None, z_t
     samples = []
     print(f"🪜 LADDER: {levels} depths from Z={z_top:.2f} down to Z={z_bottom:.2f} (machine Z {mz(z_top):.2f} .. {mz(z_bottom):.2f}), "
           f"{repeats} strokes each = {len(order)} strokes of {length_mm:.0f} mm at F{feed:.0f}")
-    with LerdgeSerial() as machine, CameraStream(MON) as cam:
+    with Machine() as machine, CameraStream(MON) as cam:
         _home(machine)
         machine.set_absolute()
         machine.set_units_mm()
