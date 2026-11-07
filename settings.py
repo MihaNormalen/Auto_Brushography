@@ -146,8 +146,10 @@ DIP_SPIRAL_R = 8.0
 MACHINE = "marlin"         # marlin = a Marlin-style board on SERIAL_PORT | fluidnc = a FluidNC controller over WiFi (FLUIDNC_HOST)
 FLUIDNC_HOST = "fluidnc.local" # FluidNC's address (name or IP); the program talks to its telnet port
 FLUIDNC_PORT = 23
-FLUIDNC_HOMING = False     # True: real homing ($HZ, then $HXY) - only with homing configured in FluidNC's config. False: the
-                           #   position FluidNC keeps is used as it is (no limit switches)
+FLUIDNC_ZERO_MACRO = None  # homing on FluidNC = this file on its SD card (e.g. ../brushograph's "zero.g": into the end stops, then
+                           #   sets the coordinates from them). None = no homing macro (see FLUIDNC_HOMING)
+FLUIDNC_HOMING = False     # True: real homing ($HZ, then $HXY) - only with homing configured in FluidNC's config. False and no
+                           #   macro: the position FluidNC keeps is used as it is (no limit switches)
 FLUIDNC_MAX_FEED = None    # mm/min: no move runs faster on FluidNC (small steppers lose steps at its max rate). None = no cap.
                            #   FluidNC runs G0 at its max rate; the programs' G0 F... is honoured as a feed instead
 MACHINE_LIMITS_MM = None   # FluidNC only: {"X": (lo, hi), "Y": (lo, hi), "Z": (lo, hi)} - a move outside is refused (not sent).
