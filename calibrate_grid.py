@@ -197,7 +197,10 @@ def main():
     ap.add_argument("--pitch", type=float, default=10.0, help="line spacing in mm, only used to give the errors in mm (default 10)")
     ap.add_argument("--out", default=LENS_FILE, help="where to write the lens (default LENS_FILE in settings.py)")
     ap.add_argument("--no_save", action="store_true", help="only measure and report, do not write lens.json")
+    import h4xx0r as HX
+    HX.add_flag(ap)
     a = ap.parse_args()
+    HX.from_args(a)                                   # --h4xx0r: the terminal in the theme (this tool has no window)
     im = cv2.imread(a.photo)
     if im is None:
         raise SystemExit(f"cannot read the picture {a.photo!r}")

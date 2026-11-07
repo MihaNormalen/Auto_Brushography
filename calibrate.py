@@ -6,12 +6,15 @@ calibrate.py
   python calibrate.py --dry_run           only write registration_dots.gcode
   python calibrate.py --from_images before.png after.png    solve from two saved photos
   python calibrate.py --no_draw           dots are on the paper right now (still wet!): photograph + solve
+  --h4xx0r                                the h4xx0r theme (green phosphor behind dirty glass; the guided window holds still)
 
 Magic-water paper: the dots fade within seconds, so photos are taken automatically.
 """
-import argparse, math
+import argparse, math, time
 import cv2
 import numpy as np
+
+import h4xx0r as HX
 
 import machine as mc
 from settings import (TOUCH_Z, HOME_LIFT_Z, CAL_HOVER_MM, Z_SAFE_DIP, CANVAS_CORNERS_MM, DOT_DWELL_MS, DOT_FEED,
@@ -167,6 +170,9 @@ class GuidedCal:
         self.clicks = [None] * 4
         self.cur = None
         self.msg = "Press 1 to send the brush to corner BL"
+        self.hx = HX if HX.ON and HX.has_font() else None
+        self.glass = HX.Glass(still=True) if self.hx else None        # the picture holds still: you click on it
+        self.t0 = time.time()
 
     def goto(self, i):
         x, y = self.corners[i]
@@ -193,7 +199,9 @@ class GuidedCal:
             return None
         return compute_homography(self.clicks, self.corners)
 
-    def render(self, frame, scale):
+    def render(self, frame, scale, plain=False):
+        if self.hx and not plain:
+            return self._render_h4xx0r(frame, scale)
         d = cv2.resize(frame, None, fx=scale, fy=scale)
         H = self.solve()
         if H is not None:
@@ -228,6 +236,41 @@ class GuidedCal:
         cv2.putText(d, "ENTER = save    R = redo all    ESC = quit", (12, d.shape[0]-9), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1)
         return d
 
+    def _render_h4xx0r(self, frame, scale):
+        """The same window in the h4xx0r theme: the grid in dim green, +X bright, +Y hot, the marks bright, the lettering in VT323
+        on see-through strips, and the glass over it - still, so a click lands where the picture shows it."""
+        C = self.hx.BGR
+        d = cv2.resize(frame, None, fx=scale, fy=scale)
+        H = self.solve()
+        lines = [(self.msg, "error" if ("NOT reached" in self.msg or "first" in self.msg) else "bright"),
+                 ("   ".join(f"{n}:{'OK' if c else '..'}" for n, c in zip(self.NAMES, self.clicks)), "dim")]
+        labels = []
+        if H is not None:
+            Hi = np.linalg.inv(H)
+            mm = np.array(self.corners)
+            px = lambda x, y: tuple(int(v * scale) for v in mm_to_pixel(Hi, x, y))
+            for x in range(int(mm[:, 0].min()) - 20, int(mm[:, 0].max()) + 21, 10):
+                cv2.line(d, px(x, mm[:, 1].min() - 20), px(x, mm[:, 1].max() + 20), C["dim"], 1)
+            for y in range(int(mm[:, 1].min()) - 20, int(mm[:, 1].max()) + 21, 10):
+                cv2.line(d, px(mm[:, 0].min() - 20, y), px(mm[:, 0].max() + 20, y), C["dim"], 1)
+            cx, cy = mm[:, 0].mean(), mm[:, 1].mean()
+            for (dx, dy), kind, lab in (((30, 0), "bright", "+X"), ((0, 30), "hot", "+Y")):
+                e = px(cx + dx, cy + dy)
+                cv2.arrowedLine(d, px(cx, cy), e, C[kind], 4, cv2.LINE_AA, tipLength=0.15)
+                labels.append((lab, (e[0] + 8, e[1] - 12), kind))
+            i = describe_orientation(H, Hi, self.corners)
+            lines.append((f"+X->{i['x_dir']}  +Y->{i['y_dir']}  {i['px_per_mm'][0]:.1f} px/mm  {i['corner_order']}"
+                          + ("  MIRRORED" if i['mirrored'] else ""), "warn" if i['mirrored'] else "ink"))
+        for k, p in enumerate(self.clicks):
+            if p is not None:
+                q = (int(p[0] * scale), int(p[1] * scale))
+                cv2.circle(d, q, 14, C["bright"], 2)
+                labels.append((self.NAMES[k], (q[0] + 18, q[1] - 24), "bright"))
+        out = self.hx.screen(d, "calibrate::guided", lines, clock=time.strftime("%H:%M:%S"),
+                             bottom=[("[1-4] brush to BL BR TR TL   [click] mark it   [ENTER] save   [R] redo all   [ESC] quit", "dim")],
+                             labels=labels, strip=0.6, t=time.time() - self.t0)
+        return self.glass.apply(out)
+
 
 def guided_calibration(use_machine=True):
     cap = open_camera()
@@ -237,7 +280,7 @@ def guided_calibration(use_machine=True):
     g = GuidedCal(machine)
     ok, fr = cap.read()
     scale = 1280.0 / fr.shape[1]
-    win = "Guided calibration"
+    win = "brushography://calibrate  [1-4] [click] [ENTER] [ESC]" if g.hx else "Guided calibration"
     cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(win, lambda ev, x, y, fl, pa: g.click(x / scale, y / scale) if ev == cv2.EVENT_LBUTTONDOWN else None)
     saved = False
@@ -256,7 +299,7 @@ def guided_calibration(use_machine=True):
             if H is None:
                 g.msg = "Mark all 4 corners first"; continue
             save_calibration(H, g.clicks, CANVAS_CORNERS_MM, image_size=(fr.shape[1], fr.shape[0]))
-            cv2.imwrite("calibration_result.png", g.render(fr, scale)); saved = True
+            cv2.imwrite("calibration_result.png", g.render(fr, scale, plain=True)); saved = True     # the record: plain
             break
         elif k == 27:
             break
@@ -276,7 +319,9 @@ if __name__ == "__main__":
     ap.add_argument("--gcode_out", default="registration_dots.gcode")
     ap.add_argument("--from_images", nargs=2, metavar=("BEFORE", "AFTER"))
     ap.add_argument("--detect_only", action="store_true", help="re-solve calibration_capture.png (+ calibration_before.png)")
+    HX.add_flag(ap)
     a = ap.parse_args()
+    HX.from_args(a)
     if a.guided:
         guided_calibration(use_machine=not a.no_machine)
     elif a.from_images or a.detect_only:

@@ -326,7 +326,10 @@ def main(argv=None):
     ap.add_argument("--analyse", action="store_true", help="measure again from the saved pictures, no camera, no machine")
     ap.add_argument("--color", default=CAL_DOT_COLOR, help=f"colour of the paint dish to use (default {CAL_DOT_COLOR})")
     ap.add_argument("--no_preview", action="store_true", help="do not open the plan picture")
+    import h4xx0r as HX
+    HX.add_flag(ap)
     a = ap.parse_args(argv)
+    HX.from_args(a)                                   # --h4xx0r: the terminal in the theme (this tool has no window)
     cal0 = V.load_calibration()
     if a.analyse:
         plan = json.load(open(PLAN))
