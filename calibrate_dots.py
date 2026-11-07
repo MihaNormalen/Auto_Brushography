@@ -76,9 +76,10 @@ def plan_dots(rect, nlong, nshort):
 
 def pick_dish(pools, color, cfg):
     """The biggest pool of the colour that is a real DISH: the same rules paint.py uses (round enough, big enough, near the dip
-    position), so a streak or a splash of that colour is not taken for the dish.
+    position, inside the machine's travel), so a streak or a splash of that colour is not taken for the dish.
     color "auto": the darkest paint there is (the black dish when there is one, as the probes do; dots show best dark)."""
-    near = lambda p: np.hypot(p["center_mm"][0] - cfg["dip_x"], p["center_mm"][1] - cfg["dip_y"]) <= cfg["palette_radius"]
+    near = lambda p: (np.hypot(p["center_mm"][0] - cfg["dip_x"], p["center_mm"][1] - cfg["dip_y"]) <= cfg["palette_radius"]
+                      and PT.reachable(p))
     if color in ("auto", "black"):
         dishes = [p for p in pools if p["roundness"] >= cfg["min_roundness"] and p["area_mm2"] >= cfg["min_pool_area"] and near(p)]
         dark = sorted([p for p in dishes if p.get("dark")], key=lambda p: -p["area_mm2"])

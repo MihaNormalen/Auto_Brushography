@@ -272,6 +272,13 @@ def hue_name(hue):
     return "?"
 
 
+def reachable(p):
+    """Can the brush get to this pool? Its centre must lie inside the machine's travel (MACHINE_X/Y_MIN/MAX in settings.py):
+    a paint tube or a label beside the machine is not a dish, however well its colour matches."""
+    x, y = p["center_mm"]
+    return S.MACHINE_X_MIN <= x <= S.MACHINE_X_MAX and S.MACHINE_Y_MIN <= y <= S.MACHINE_Y_MAX
+
+
 def assign_dishes(layers, pools, cfg, max_hue_distance=22.0):
     """Which paint pool (found by the camera) belongs to which layer. Matching is by hue, because paint in a dish
     never looks exactly like the artwork colour. Black has no colour to find: it uses the configured dip position."""
@@ -2256,6 +2263,8 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
             rnd = p.get("roundness", 1.0)
             if d > cfg["palette_radius"]:
                 verdict = f"-> IGNORED, {d:.0f} mm from the dip position"
+            elif not reachable(p):
+                verdict = "-> IGNORED, out of the machine's reach (MACHINE_X/Y_MIN/MAX in settings.py)"
             elif p["area_mm2"] < cfg["min_pool_area"]:
                 verdict = f"-> IGNORED, too small ({p['area_mm2']:.0f} mm2 - a speck or splash, not a dish; POOL_MIN_AREA_MM2 in settings.py)"
             elif rnd < cfg["min_roundness"]:
