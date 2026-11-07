@@ -147,7 +147,9 @@ SERIAL_PORT = "COM9"
 SERIAL_BAUD = 115200
 SERIAL_TIMEOUT = 5
 
-CAMERA_INDEX = 0
+CAMERA_URL = None          # a network camera (MJPEG over HTTP, or RTSP), e.g. "http://camera.local:8080/stream"; its size is
+                           #   set on the camera itself. None = the USB camera CAMERA_INDEX
+CAMERA_INDEX = 0           # the USB camera (only used when CAMERA_URL = None)
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 CAMERA_EXPOSURE = -5
