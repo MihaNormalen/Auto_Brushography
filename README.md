@@ -48,6 +48,9 @@ signature options. Every setting has a comment explaining it. Start with:
 - `TOUCH_Z`: the machine Z where the brush tip touches the paper (rough; the probes measure it exactly).
 - `SIGNATURE`: a picture of your signature (black on white), or `None` for no signature.
 
+Settings that only apply to your own computer (your machine, your camera) go in `settings_local.py` next to
+`settings.py`: it is not in git, it is read last and what it sets wins, e.g. `SERIAL_PORT = "COM3"`.
+
 Then calibrate the camera:
 
 ```
