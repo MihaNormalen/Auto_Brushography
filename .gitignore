@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+
+# everything a run writes into the program folder: camera pictures, overlays, plans, G-code, videos, logs
+/*.png
+/*.jpg
+/*.gcode
+/*.mp4
+/*.pdf
+/*.txt
+!/requirements.txt
+probe_plan.json
+probe_result.json
+probe_sheet.json
+touch_test.json
+*.bak.json
+calibration_backup_*.npz
+
+# working folders (artworks being painted, generated pictures, recordings)
+ko/
+comfyui/
+GIF/
+strokes_*/
+
+# editor / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

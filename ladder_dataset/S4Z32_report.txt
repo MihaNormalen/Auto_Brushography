@@ -1,0 +1,22 @@
+
+  Z (logical) | machine Z | below contact | strokes | marked along | width median  (p10 - p90) mm
+  ------------+-----------+---------------+---------+--------------+------------------------------
+         0.50 |      3.50 |           -   |       1 |          0 % | no mark
+         0.20 |      3.20 |           -   |       1 |          0 % | no mark
+        -0.10 |      2.90 |           -   |       1 |          0 % | no mark
+        -0.40 |      2.60 |         +0.00 |       1 |        100 % | 0.96  (0.89 - 0.99)
+        -0.70 |      2.30 |         +0.30 |       1 |        100 % | 0.97  (0.94 - 0.99)
+        -1.00 |      2.00 |         +0.60 |       1 |        100 % | 1.88  (1.62 - 1.94)
+        -1.30 |      1.70 |         +0.90 |       1 |        100 % | 2.28  (2.12 - 2.41)
+        -1.60 |      1.40 |         +1.20 |       1 |        100 % | 1.86  (1.71 - 2.04)
+        -1.90 |      1.10 |         +1.50 |       1 |        100 % | 2.22  (1.87 - 2.26)
+        -2.20 |      0.80 |         +1.80 |       1 |         71 % | 1.35  (1.20 - 2.44)
+        -2.50 |      0.50 |         +2.10 |       1 |        100 % | 2.77  (2.51 - 2.81)
+        -2.80 |      0.20 |         +2.40 |       1 |         71 % | 2.90  (2.84 - 3.10)
+
+  Contact height: logical Z = -0.40 (machine Z = 2.60): the highest level that marks along >= 80% of the stroke.
+  Thinnest reliable line: 0.96 mm.  Widest: 2.77 mm, reached 2.10 mm below contact (logical Z = -2.50).
+
+  Numbers for mama4.py (brush width at the touch height, widest line, and the depth that gives it):
+     --z_offset 2.60 --line_depth 2.1 --width_min 1.0 --width_ref 2.8 --brush 1.0
+     (--z_offset: the machine Z where the tip just marks; the brush cannot paint lines thinner than --width_min.)

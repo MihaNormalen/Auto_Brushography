@@ -1,0 +1,17 @@
+{
+ "cx": 960.0,
+ "cy": 540.0,
+ "R": 1262.265808457157,
+ "a1": 0.08834425954484489,
+ "r2max": 0.5,
+ "image_size": [
+  1920,
+  1080
+ ],
+ "crossings": 531,
+ "cv_rms_homography_mm": 0.5315309835609745,
+ "cv_rms_lens_mm": 0.44513014461437833,
+ "assumed_pitch_mm": 10.0,
+ "photo": "preview_snapshot.png",
+ "created": "2026-10-24 17:19:37"
+}
