@@ -136,6 +136,28 @@ def load_rgb(path, width_mm, res=RES, rotate=0):
     return np.array(img.resize((w, h), Image.Resampling.LANCZOS))
 
 
+def load_style_map(img_path, shape, rotate=0):
+    """<artwork>.styles.json next to the artwork: boxes on the picture, each planned in its own INFILL_STYLE (e.g. a test sheet
+    with every style, ko/styles_sheet.png). Format: {"regions": [{"box": [x0, y0, x1, y1], "style": "leaf"}, ...]}, the box in
+    pixels of the picture as drawn, optionally "infill_type": "rings". Returns (labels at planning resolution, turned and flipped
+    like load_rgb: 0 = in no box, i = regions[i - 1]; regions), or None without the file."""
+    import json
+    side = os.path.splitext(img_path)[0] + ".styles.json"
+    if not os.path.exists(side):
+        return None
+    regions = json.load(open(side, encoding="utf-8"))["regions"]
+    w0, h0 = Image.open(img_path).size
+    lab = np.zeros((h0, w0), np.uint8)
+    for i, r in enumerate(regions, 1):
+        x0, y0, x1, y1 = (int(v) for v in r["box"])
+        lab[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = i
+    im = Image.fromarray(lab)
+    if rotate == 90:
+        im = im.rotate(90, expand=True)
+    im = im.transpose(Image.FLIP_TOP_BOTTOM).resize((shape[1], shape[0]), Image.Resampling.NEAREST)
+    return np.array(im), regions
+
+
 def find_layers(rgb, thr=140, min_share=0.003, min_mm=3.0, res=RES):
     """Splits the artwork into colour layers, each pixel in exactly one layer:
     coloured pixels go to their hue family (blue, red, ...), dark neutral pixels to 'black'.
@@ -423,8 +445,13 @@ def cut_spur(s, res):
     for i in range(4, n):
         d = np.hypot(P[:i - 3, 0] - P[i, 0], P[:i - 3, 1] - P[i, 1])
         if d.size and d.min() < tol:
-            far = np.hypot(P[:i, 0] - P[0, 0], P[:i, 1] - P[0, 1])
-            k = int(np.argmax(far)) + 1
+            j = int(np.argmin(d))
+            if float((P[i] - P[i - 1]) @ (P[j + 1] - P[j])) > 0:   # over its earlier points in the SAME direction: a closed ring
+                k = i + 1                                 # (an O, a ring) closing on itself, not a turn back: keep it all the way
+                                                          # round, without the second time over (cut at the farthest point = half)
+            else:
+                far = np.hypot(P[:i, 0] - P[0, 0], P[:i, 1] - P[0, 1])
+                k = int(np.argmax(far)) + 1
             new = Stroke([tuple(p) for p in P[:k]], getattr(s, "kind", "fill"))
             if getattr(s, "widths", None) is not None:
                 new.widths = list(s.widths)[:k]
@@ -2268,7 +2295,22 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
         cfg_l["infill_style"] = (cfg.get("infill_style_by_color") or {}).get(L["name"], cfg["infill_style"])
         if cfg_l["infill_style"] != cfg["infill_style"]:
             vprint(f"   {L['name']}: infill style {cfg_l['infill_style']}")
-        strokes, kinds = plan_strokes(L["mask"], cfg_l)
+        smap = load_style_map(img_path, L["mask"].shape, cfg.get("rotate", 0))
+        if smap is None:
+            strokes, kinds = plan_strokes(L["mask"], cfg_l)
+        else:                                                               # <artwork>.styles.json: a style per box
+            lab, regions = smap
+            vprint(f"   {len(regions)} boxes with their own style ({os.path.splitext(img_path)[0]}.styles.json)")
+            strokes, kinds = [], {"thin": 0, "lines": 0, "rings": 0, "outline": 0, "patch": 0}
+            parts = [(0, cfg_l)] + [(i, dict(cfg_l, infill_style=r["style"], infill_type=r.get("infill_type", cfg_l["infill_type"])))
+                                    for i, r in enumerate(regions, 1)]
+            for i, cfg_r in parts:
+                part = L["mask"] & (lab == i)
+                if part.any():
+                    s_r, k_r = plan_strokes(part, cfg_r)
+                    strokes += s_r
+                    for key, v in k_r.items():
+                        kinds[key] += v
         try:                                                                # picture of the blobs / leaves and their strokes
             import leaf_style
             grp = [(np.asarray(s, float), np.asarray(s.widths, float), s.group if s.group is not None else ("s", n_s))
