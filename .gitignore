@@ -28,3 +28,6 @@ strokes_*/
 .idea/
 Thumbs.db
 desktop.ini
+
+# this computer's own settings (settings.py reads them last)
+settings_local.py
