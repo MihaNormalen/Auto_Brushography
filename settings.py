@@ -143,7 +143,15 @@ DIP_SPIRAL_R = 8.0
 
 
 # =============================== 7. MACHINE, CAMERA, CANVAS (rarely changed) =========================
-SERIAL_PORT = "COM9"
+MACHINE = "marlin"         # marlin = a Marlin-style board on SERIAL_PORT | fluidnc = a FluidNC controller over WiFi (FLUIDNC_HOST)
+FLUIDNC_HOST = "fluidnc.local" # FluidNC's address (name or IP); the program talks to its telnet port
+FLUIDNC_PORT = 23
+FLUIDNC_HOMING = False     # True: real homing ($HZ, then $HXY) - only with homing configured in FluidNC's config. False: the
+                           #   position FluidNC keeps is used as it is (no limit switches)
+MACHINE_LIMITS_MM = None   # FluidNC only: {"X": (lo, hi), "Y": (lo, hi), "Z": (lo, hi)} - a move outside is refused (not sent).
+                           #   Without limit switches nothing else stops the head running into the ends. None = no check
+
+SERIAL_PORT = "COM9"       # only for MACHINE = "marlin"
 SERIAL_BAUD = 115200
 SERIAL_TIMEOUT = 5
 

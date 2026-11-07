@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
-"""serial_test.py - checks the connection to the machine. Sends ONLY M115 (firmware info). Does NOT move anything.
+"""serial_test.py - checks the connection to the machine. Does NOT move anything.
+    With MACHINE = "fluidnc" in settings.py: connects to FLUIDNC_HOST and asks only $I (firmware info) and ? (state).
+    With MACHINE = "marlin": sends ONLY M115 (firmware info):
     python serial_test.py              (SERIAL_PORT from settings.py, several speeds, two line endings)
     python serial_test.py COM9         (another port)
 """
 import sys, time
-import serial
-from serial.tools import list_ports
 
 try:
     import settings as S
     port = S.SERIAL_PORT
 except Exception:
-    port = "COM9"
+    S, port = None, "COM9"
+
+if S is not None and getattr(S, "MACHINE", "marlin").lower() == "fluidnc" and len(sys.argv) < 2:
+    import machine
+    m = machine.FluidNCLink()
+    m.connect()                                  # prints the firmware and the state, stops with a hint if unreachable
+    m.disconnect()
+    print("  -> the machine answers. Connection works.")
+    raise SystemExit
+
+import serial
+from serial.tools import list_ports
 if len(sys.argv) >= 2:
     port = sys.argv[1]
 
