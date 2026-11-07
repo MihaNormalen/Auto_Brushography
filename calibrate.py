@@ -179,11 +179,15 @@ class GuidedCal:
         self.cur, self.clicks[i] = i, None
         if self.m is not None:
             self.msg = f"Moving brush over {self.NAMES[i]} (X{x:.0f} Y{y:.0f}) ..."
+            self.m.last_error = None
             self.m.send_line(f"G0 Z{HOME_LIFT_Z:.3f} F3000")                       # travel high ...
             self.m.send_line(f"G0 X{x + X_OFFSET:.3f} Y{y + Y_OFFSET:.3f} F{FEED_TRAVEL}", timeout=30)
+            if self.m.last_error:                                                  # refused (out of range): do not come down here
+                self.cur, self.msg = None, f"{self.NAMES[i]} NOT reached: {self.m.last_error} - fix CANVAS_CORNERS_MM"
+                return
             self.m.send_line(f"G0 Z{CAL_HOVER_Z:.3f} F3000")                       # ... and come down to just above the paper
             self.m.send_line("M400")
-        self.msg = f"CLICK the brush tip (or the dot under it) for {self.NAMES[i]}"
+        self.msg = f"CLICK where the brush meets the paper (holder ring, NOT the far end of the stick) for {self.NAMES[i]}"
 
     def click(self, px, py):
         if self.cur is None:

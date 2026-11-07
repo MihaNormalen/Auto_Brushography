@@ -193,6 +193,7 @@ CAMERA_FOURCC = "MJPG"
 CAMERA_SET_EXPOSURE = False   # True = apply CAMERA_EXPOSURE manually
 
 # canvas corners (mm) = the four calibration dots: bottom-left, bottom-right, top-right, top-left
+# (calibrate.py --guided hovers the brush over them; they only have to be far apart and visible to the camera)
 CANVAS_CORNERS_MM = [
     (80.0, 200.0),
     (200.0, 200.0),
