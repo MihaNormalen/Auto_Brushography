@@ -2499,6 +2499,11 @@ class LivePreview:
         self.thread = None
         self.latest = None                                         # the newest camera frame (the photos take it from here)
         self.win = "paint - painting (Q closes this window, O planned strokes on/off)"
+        import h4xx0r as _hx
+        self.hx = _hx if _hx.ON else None                             # the h4xx0r theme (--h4xx0r): its lettering and its glass
+        if self.hx:
+            self.win = "brushography://live_feed  [Q] close  [O] planned strokes"
+            self.glass = _hx.Glass()
         self._disp, self._shown, self._win_open, self._last_pump = None, None, False, 0.0
 
     def start(self):
@@ -2640,6 +2645,17 @@ class LivePreview:
                 frac = 1.0 if self.done else min(1.0, self.est_done / self.total_est)
                 el = time.time() - self.t0
                 left = (el * (1 - frac) / frac) if frac > 0.02 else None
+                if self.hx:                                         # the h4xx0r theme: its lettering, then the glass over all of it
+                    small = cv2.resize(disp, (1280, int(round(1280 * h / w))), interpolation=cv2.INTER_AREA)
+                    info = (f"t+{int(el // 60):02d}:{int(el % 60):02d}" +
+                            (f"  eta {int(left // 60):02d}:{int(left % 60):02d}" if left is not None and not self.done else "") +
+                            f"  dips {self.dips}  line {self.i}/{self.total}")
+                    themed = self.hx.hud(small, "job complete" if self.done else f"layer::{self.layer or '-'}", info,
+                                         time.strftime("%H:%M:%S"), frac, done=self.done, frozen=same > 45, t=el)
+                    if themed is not None:
+                        self._disp = self.glass.apply(themed)
+                        time.sleep(0.03)
+                        continue
                 bar = disp.copy()
                 cv2.rectangle(bar, (0, 0), (w, 70), (0, 0, 0), -1)
                 cv2.rectangle(bar, (0, h - 22), (w, h), (0, 0, 0), -1)
@@ -3587,7 +3603,12 @@ def main(argv=None):
                          "or paint just one: blue, red, ... or r,g,b")
     ap.add_argument("--tol", type=float, default=40.0, help="with r,g,b: how close a colour must be (Lab distance, default 40)")
     ap.add_argument("--list_colors", action="store_true", help="only list the colours in the artwork and exit")
+    ap.add_argument("--h4xx0r", action="store_true", help="the h4xx0r theme of ../brushograph's WebUI: a green phosphor terminal "
+                    "and a live preview behind dirty glass (or H4XX0R = True in settings.py)")
     a = ap.parse_intermixed_args(argv)                                   # file names and options in any order
+    if a.h4xx0r or getattr(__import__("settings"), "H4XX0R", False):
+        import h4xx0r
+        h4xx0r.enable()
     print(f"paint.py build {BUILD}")
     S = load_settings()                                                  # settings.py: fills in what was not typed
     used = []

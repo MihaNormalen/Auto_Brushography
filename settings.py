@@ -73,6 +73,7 @@ ARTWORK = None             # e.g. "PoletnaModra.png": then you can run  python p
 OUTPUT = None              # e.g. "out.gcode"  (None = the artwork's name + .gcode)
 ARTWORK_WIDTH_MM = None    # None = as large as fits on the paper
 ROTATE = "auto"            # "auto" = the artwork is turned by 90 degrees when it then fits larger (landscape art on portrait paper), 0 = never, 90 = always
+H4XX0R = False             # True = every program in the h4xx0r theme (the same as --h4xx0r: paint, preview, calibrate*)
 SIGNATURE = "podpis2.png"  # painted FIRST (right after the probes), in the bottom margin under the artwork's right edge. None = no signature
 SIGN_INSIDE = True         # True: the signature goes INSIDE the artwork's bottom right corner (no extra bottom margin: the artwork is
                            # bigger, and paints over the signature where they meet). False: in its own margin under the artwork
