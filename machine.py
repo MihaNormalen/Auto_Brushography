@@ -12,6 +12,8 @@ from settings import SERIAL_PORT, SERIAL_BAUD, SERIAL_TIMEOUT, HOME_LIFT_Z, ACCE
 _IGNORE = [re.compile(p) for p in (r'^echo:', r'^busy:', r'^T:\d', r'^Cap:', r'^\s*$', r'^<', r'^\[MSG:')]
 VERBOSE = True
 LINE_HOOK = None      # optional callable(line) - lets a monitor watch G-code without printing it
+WAIT_HOOK = None      # optional callable() - called often while waiting for the machine (FluidNC); the live preview draws its
+                      #   window from it, because on macOS a window may only be drawn from the main thread, which is the one waiting
 
 
 class LerdgeSerial:
@@ -173,7 +175,7 @@ class FluidNCLink(LerdgeSerial):
             raise SystemExit(f"STOPPED: cannot reach FluidNC at {self.host}:{self.tcp_port} ({e}). "
                              "Is it switched on and in the same WiFi? Nothing was moved.")
         self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.sock.settimeout(1.0)
+        self.sock.settimeout(0.1)
         time.sleep(0.3)
         self._drain()
         print("Connected.")
@@ -210,6 +212,11 @@ class FluidNCLink(LerdgeSerial):
             try:
                 d = self.sock.recv(4096)
             except socket.timeout:
+                if WAIT_HOOK is not None:
+                    try:
+                        WAIT_HOOK()
+                    except Exception:
+                        pass
                 continue
             if not d:
                 raise ConnectionError("FluidNC closed the connection")
@@ -229,7 +236,7 @@ class FluidNCLink(LerdgeSerial):
                 got += d
         except (socket.timeout, BlockingIOError):
             pass
-        self.sock.settimeout(1.0)
+        self.sock.settimeout(0.1)
         self._buf = b""
         return got.decode("ascii", errors="replace")
 
