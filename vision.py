@@ -5,13 +5,14 @@ vision.py - everything about the camera:  1. open/capture   2. calibration (pixe
 import json
 import math
 import sys
+import threading
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from settings import (CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_EXPOSURE, CAMERA_BACKEND, CAMERA_FOURCC, CAMERA_SET_EXPOSURE,
+from settings import (CAMERA_URL, CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_EXPOSURE, CAMERA_BACKEND, CAMERA_FOURCC, CAMERA_SET_EXPOSURE,
                       CALIBRATION_FILE, CAMERA_X_AXIS, CAMERA_Y_AXIS, PAPER_FILE)
 
 # A native crash (the program ends without a message) is written to crash_log.txt in the folder you run from.
@@ -39,14 +40,121 @@ def _backend_list(requested: str) -> list:
     return [cv2.CAP_V4L2, cv2.CAP_ANY]
 
 
+class StreamCamera:
+    """A network camera (an MJPEG stream over HTTP, RTSP, ...) that behaves like cv2.VideoCapture for this program
+    (read / get / set / isOpened / release).
+    A thread reads the stream all the time and keeps only the newest picture: OpenCV queues network pictures, so a program
+    that reads only now and then would otherwise get pictures from seconds ago. read() waits for a picture that arrived after
+    the previous read(), like a real camera, so "read a few to flush, then take one" still gives a fresh picture.
+    A dropped connection is opened again."""
+
+    def __init__(self, url, timeout=5.0, verbose=True):
+        self.url, self.timeout, self.verbose = url, timeout, verbose
+        self._cond = threading.Condition()
+        self._frame, self._seq, self._read_seq = None, 0, 0
+        self._run = True
+        self._cap = self._connect()
+        if self._cap is None:
+            raise RuntimeError(f"cannot open the camera stream {url}")
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        with self._cond:
+            if not self._cond.wait_for(lambda: self._frame is not None, timeout=timeout):
+                self.release()
+                raise RuntimeError(f"the camera stream {url} opened but sent no picture in {timeout:.0f} s")
+
+    def _connect(self):
+        for be in (cv2.CAP_FFMPEG, cv2.CAP_ANY):
+            cap = cv2.VideoCapture(self.url, be)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                return cap
+            cap.release()
+        return None
+
+    def _loop(self):
+        fails = 0
+        while self._run:
+            ok, f = self._cap.read() if self._cap is not None else (False, None)
+            if ok and f is not None:
+                fails = 0
+                with self._cond:
+                    self._frame, self._seq = f, self._seq + 1
+                    self._cond.notify_all()
+                continue
+            fails += 1
+            if fails < 20:
+                time.sleep(0.05)
+                continue
+            if self.verbose:
+                print(f"camera stream {self.url}: no pictures, connecting again")
+            if self._cap is not None:
+                self._cap.release()
+            time.sleep(1.0)
+            self._cap = self._connect() if self._run else None
+            fails = 0
+
+    def read(self):
+        """The next picture (one that arrived after the previous read), or (False, None) after `timeout` seconds without one."""
+        with self._cond:
+            if not self._cond.wait_for(lambda: not self._run or self._seq > self._read_seq, timeout=self.timeout) or not self._run:
+                return False, None
+            self._read_seq = self._seq
+            return True, self._frame.copy()
+
+    def get(self, prop):
+        f = self._frame
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return float(f.shape[1]) if f is not None else 0.0
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return float(f.shape[0]) if f is not None else 0.0
+        cap = self._cap
+        return cap.get(prop) if cap is not None else 0.0
+
+    def set(self, prop, value):
+        return False                                   # size, exposure, focus are set on the camera's own server, not from here
+
+    def isOpened(self):
+        return self._run
+
+    def release(self):
+        self._run = False
+        with self._cond:
+            self._cond.notify_all()
+        t = getattr(self, "_thread", None)
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=3)
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+
+def _open_stream(url, verbose=True) -> StreamCamera:
+    cap = StreamCamera(url, verbose=verbose)
+    w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if verbose:
+        print(f"Camera stream {url} opened: {w}x{h}")
+    try:
+        cal_size = np.load(CALIBRATION_FILE)["image_size"] if Path(CALIBRATION_FILE).exists() else None
+    except Exception:
+        cal_size = None
+    if cal_size is not None and tuple(int(v) for v in cal_size) != (w, h):
+        print(f"  WARNING: the calibration ({CALIBRATION_FILE}) was made at {int(cal_size[0])}x{int(cal_size[1])}, the stream is {w}x{h}. "
+              "Calibrate again (calibrate_grid.py, then calibrate_dots.py).")
+    return cap
+
+
 def open_camera(index=CAMERA_INDEX, width=CAMERA_WIDTH, height=CAMERA_HEIGHT,
-                backend=CAMERA_BACKEND, verbose=True, tries=4) -> cv2.VideoCapture:
+                backend=CAMERA_BACKEND, verbose=True, tries=4, url=CAMERA_URL):
     """Open the camera, with retries. The camera is often still held for a moment after another part of the program let go of it,
     and OpenCV sometimes raises 'Unknown C++ exception' instead of returning a failure. Both are retried, with a longer pause each time.
-    If all tries fail, the reason is raised as RuntimeError."""
+    If all tries fail, the reason is raised as RuntimeError.
+    With a `url` (CAMERA_URL in settings.py) the network stream is used instead of the USB camera `index`."""
     last = None
     for k in range(1, tries + 1):
         try:
+            if url:
+                return _open_stream(url, verbose)
             return _open_camera_once(index, width, height, backend, verbose)
         except Exception as e:                       # includes OpenCV's own exceptions
             last = e

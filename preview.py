@@ -1,9 +1,10 @@
 """
 brushograph/preview.py  —  plain live camera preview (no calibration needed)
 
-  python preview.py            open CAMERA_INDEX from settings.py
+  python preview.py            open CAMERA_URL (or, if None, CAMERA_INDEX) from settings.py
+  python preview.py --url http://host:8080/stream   try a network camera stream
   python preview.py --list     find which camera indices work
-  python preview.py --index 1  try another camera
+  python preview.py --index 1  try another USB camera (ignores CAMERA_URL)
 
   python preview.py --h4xx0r  the h4xx0r theme (green phosphor behind dirty glass)
 
@@ -13,10 +14,11 @@ import argparse, time
 import cv2
 import h4xx0r as HX
 from vision import open_camera, list_cameras
-from settings import CAMERA_INDEX
+from settings import CAMERA_INDEX, CAMERA_URL
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--index", type=int, default=CAMERA_INDEX)
+ap.add_argument("--index", type=int, default=None)
+ap.add_argument("--url", default=None)
 ap.add_argument("--list", action="store_true")
 HX.add_flag(ap)
 a = ap.parse_args()
@@ -27,8 +29,9 @@ if a.list:
     print("Working cameras:", cams or "none found")
     raise SystemExit
 
-cap = open_camera(index=a.index)
-source = f"usb camera {a.index}"
+cap = open_camera(index=CAMERA_INDEX if a.index is None else a.index,
+                  url=a.url or (CAMERA_URL if a.index is None else None))
+source = a.url or (CAMERA_URL if a.index is None else None) or f"usb camera {CAMERA_INDEX if a.index is None else a.index}"
 win = "brushography://preview  [Q] quit  [S] save  [X] crosshair" if themed else "Preview  (Q quit, S save, X crosshair)"
 cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(win, 1280, 720)
