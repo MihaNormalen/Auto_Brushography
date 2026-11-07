@@ -30,6 +30,8 @@ from skimage.morphology import skeletonize
 import brush_profile as BP
 import machine as mc
 import settings as S
+Z_MIN = float(getattr(S, "MACHINE_Z_MIN", 0.2))      # the lowest Z the brush is ever sent to (main() has its own S)
+Z_MAX = float(((getattr(S, "MACHINE_LIMITS_MM", None) or {}).get("Z") or (0, 1e9))[1])   # ... and the highest
 from vision import mm_to_px_array, px_to_mm_array, load_calibration
 
 RES = 8.0        # pixels per mm used for planning
@@ -352,13 +354,13 @@ def apply_probe(cfg, res, a):
     curve = (list(res["curve"][0]), list(res["curve"][1]))
     cfg["z_offset"] = cfg["z_paint"] = contact
     cfg["z_low"] = max(cfg["z_low"], contact + float(S.TRAVEL_MM))             # never closer to the paper than before
-    cfg["z_high"] = max(cfg["z_high"], contact + float(S.HIGH_MM))
+    cfg["z_high"] = min(max(cfg["z_high"], contact + float(S.HIGH_MM)), Z_MAX)      # never into the top stop
     cfg["curve"] = curve
     cfg["aniso"] = res.get("aniso") if getattr(S, "PROBE_USE_ANISO", False) else None   # see PROBE_USE_ANISO in settings.py
     pf = cfg.get("paper_frame") or {}
     if pf.get("u") and pf.get("v"):
         cfg["aniso_axes"] = (tuple(pf["u"][:2]), tuple(pf["v"][:2]))
-    room = contact - 0.2                                                       # how far below the contact the machine can go (Z 0.2)
+    room = contact - Z_MIN                                           # how far below the contact the machine can go (MACHINE_Z_MIN)
     cfg["line_depth"] = round(max(min(curve[0][-1], room), 0.0), 2)
     mine = getattr(a, "from_profile", set())                                   # numbers the PROFILE put there are replaced by the measured ones; yours stay
     if a.line_depth is not None and "line_depth" not in mine:                  # your own limit (LINE_DEPTH in settings.py / --line_depth) still holds
@@ -391,7 +393,7 @@ def apply_probe(cfg, res, a):
         print(f"   brush tip: the paint lands {cfg['tool_offset'][0]:+.2f} mm in X / {cfg['tool_offset'][1]:+.2f} mm in Y from where it is told; every X / Y in this job is shifted "
               f"by the opposite, so the strokes land where the overlay shows them")
     if room < curve[0][-1] - 1e-6:
-        print(f"   WARNING: the deepest line is limited by the machine's Z 0.2: only {room:.1f} mm below the contact are possible, the widest "
+        print(f"   WARNING: the deepest line is limited by MACHINE_Z_MIN ({Z_MIN:g}): only {room:.1f} mm below the contact are possible, the widest "
               f"lines the brush could make ({curve[1][-1]:.2f} mm) are out of reach. A brush mounted about {curve[0][-1] - room:.1f} mm longer would give them.")
 
 
@@ -3160,7 +3162,7 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
 
     def z_of(w, extra=extra_mm):
         d = float(np.interp(min(float(w), wmax), cw, cd))
-        return max(0.3, contact - d - extra)
+        return max(Z_MIN, contact - d - extra)
 
     cfg2 = dict(cfg); cfg2["outline"] = False
     cfg2["infill_style"] = "lines"                                 # small spots: plain strokes, not leaves (fewer, longer moves)
@@ -3938,13 +3940,14 @@ def main(argv=None):
     if a.z_offset is not None:
         cfg["z_offset"] = a.z_offset
     if cfg["line_depth"] is None:                              # not set anywhere: ON when the Z offset gives room below, else off
-        cfg["line_depth"] = round(cfg["z_offset"] - 0.2, 2) if cfg["z_offset"] >= 0.5 else 0.0     # the whole room below the touch height (down to Z 0.2)
+        room0 = cfg["z_offset"] - Z_MIN
+        cfg["line_depth"] = round(room0, 2) if room0 >= 0.5 else 0.0     # the whole room below the touch height (down to MACHINE_Z_MIN)
         cfg["line_depth_auto"] = True
     if cfg["line_depth"] < 0:
         raise SystemExit("--line_depth cannot be negative")
-    room = cfg["z_offset"] - 0.2                          # how far below the touch height the machine can go (Z 0.2)
+    room = cfg["z_offset"] - Z_MIN            # how far below the touch height the machine can go (MACHINE_Z_MIN)
     if curve is not None and cfg["line_depth"] > room > 0:
-        vprint(f"depth limited to {room:.2f} mm (machine Z 0.2) by the room below the touch height {cfg['z_offset']:.2f}  (the profile goes to {cfg['line_depth']:.1f} mm)")
+        vprint(f"depth limited to {room:.2f} mm (MACHINE_Z_MIN {Z_MIN:g}) by the room below the touch height {cfg['z_offset']:.2f}  (the profile goes to {cfg['line_depth']:.1f} mm)")
         cfg["line_depth"] = round(room, 2)
     for key, val in (("feed_paint", a.paint_feed), ("accel_paint", a.paint_accel), ("plunge_feed", a.plunge_feed), ("wipe_feed", a.wipe_feed), ("point_step", a.point_step)):
         if val is not None:
@@ -3964,9 +3967,10 @@ def main(argv=None):
         cfg["thin_max"] = cfg["brush_w"] * 1.1
     for key in ("z_paint", "z_low", "z_high", "z_wipe_exit", "dip_z"):          # machine Z = logical Z + offset
         cfg[key] += cfg["z_offset"]
+    cfg["z_high"] = min(cfg["z_high"], Z_MAX)                                   # never into the top stop
     lowest = cfg["z_paint"] - cfg["line_depth"]
-    if lowest < -1e-9 or min(cfg["z_paint"], cfg["dip_z"]) < -1e-9:
-        raise SystemExit(f"the lowest Z would be {min(lowest, cfg['dip_z']):.2f} mm - below the machine's Z 0.\n"
+    if lowest < Z_MIN - 1e-9 or min(cfg["z_paint"], cfg["dip_z"]) < Z_MIN - 1e-9:
+        raise SystemExit(f"the lowest Z would be {min(lowest, cfg['dip_z']):.2f} mm - below MACHINE_Z_MIN ({Z_MIN:g}).\n"
                          f"  The brush needs more room below: mount it lower and use --z_offset {max(cfg['line_depth'], 0) + cfg['z_offset']:.1f} "
                          f"(or Z_OFFSET in settings.py), or use a smaller --line_depth.")
     if cfg["z_paint"] >= cfg["z_low"]:

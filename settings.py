@@ -16,6 +16,9 @@ BASE_DIR = Path(__file__).resolve().parent            # files are always found n
 
 # =============================== 1. HEIGHTS ==========================================================
 TOUCH_Z = 4.2                # 2026-11-01: brush re-mounted, touches at Z 4 (by hand; the probe said 4.09). Was ~6.1 (2026-10-28)
+MACHINE_Z_MIN = 0.2          # the lowest Z the brush is ever sent to (paint, probes, repairs, calibration dots). 0.2 = just above
+                             #   the bottom of this machine's travel. A machine whose Z 0 is the paper paints by pressing INTO it:
+                             #   below 0 there (e.g. -4)
 #   machine Z where the brush tip touches the paper (rough). TRAINING: the ladder starts 0.5 mm above it and goes
 #   down to machine Z 0.2. PAINTING: used only when there is NO brush profile; with a profile the measured contact is used.
 
@@ -245,7 +248,7 @@ PROBE_RETRY_MM = 1.0            # ... each retry starts this much higher
 PROBE_APPLY_OFFSET = True       # True = shift the job by where the probes saw the paint land (brush tip offset). False = paint where told
 PROBE_FILE = "probe_result.json"   # where the probe result is saved and read from (next to the scripts)
 PROBE_ABOVE_MM = 4.0           # (2026-11-08: 4 for the big 411 x 277 sheet, it touched above 4.55; was 2.0) a ramp starts this far ABOVE the contact you expect (in the air); the real contact varies over the paper ...
-PROBE_BELOW_MM = 4.0            # ... and ends this far below it (never below machine Z 0.3). The deepest point measured = the widest
+PROBE_BELOW_MM = 4.0            # ... and ends this far below it (never below MACHINE_Z_MIN). The deepest point measured = the widest
                                 # mark a job uses: 3.0 stopped at 2.75 mm deep / 2.88 mm wide while the line was still widening (2026-10-25)
 PAINT_COLOR = "auto"           # "black" = the whole artwork is painted in black, whatever colours the picture has (by design);
                                 # "auto" = every colour of the picture becomes a layer with its own dish. --color overrides it
@@ -371,7 +374,7 @@ REPAIR_FADED_SHARE = 0.5     # black that is painted but less than this share as
 REPAIR_TAPER_MAX_TURN_DEG = 30.0   # a run stops where it would cut across the painted lines around it by more than this (degrees)
 REPAIR_PASSES = 1000         # at most this many repair passes (1000 = until done or no progress; REPAIR_MIN_PROGRESS stops it)
 REPAIR_STEP_MM = 0.2         # each repair pass presses this much deeper than the one before (2026-11-08: was 0.15) ...
-REPAIR_MAX_DEEPER_MM = 2.0   # ... but never more than this below the first pass (was 1.0); never below machine Z 0.3 either
+REPAIR_MAX_DEEPER_MM = 2.0   # ... but never more than this below the first pass (was 1.0); never below MACHINE_Z_MIN either
 REPAIR_MAX_SHIFT_MM = 1.5    # no repair when the paint sits further than this from where the plan put it (the photo would mislead it)
 REPAIR_LINE_MAX_MM = 2.5     # thin lines of the artwork (narrower than this) are checked along their centre line ...
 REPAIR_LINE_NEAR_MM = 0.7    # ... and repainted where no paint lies within this distance of it ...
