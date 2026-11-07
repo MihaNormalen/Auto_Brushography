@@ -2517,11 +2517,18 @@ class LivePreview:
         self.i, self.layer, self.dips, self.est_done = i, layer, dips, est_done
         self.pump()
 
+    def _ui_thread(self):
+        """Is this the thread that draws the window? On macOS the MAIN one (it draws windows nowhere else). Elsewhere the camera
+        thread, as before: the serial link has no WAIT_HOOK, so the main thread would leave the window frozen during long moves."""
+        import sys, threading
+        if sys.platform == "darwin":
+            return threading.current_thread() is threading.main_thread()
+        return threading.current_thread() is self.thread
+
     def pump(self):
-        """Shows the newest picture and reads the keys. Only from the MAIN thread (macOS draws windows nowhere else): the camera
-        thread only prepares the picture (self._disp); this is called for every G-code line and while waiting for the machine."""
-        import threading
-        if not self.show or threading.current_thread() is not threading.main_thread():
+        """Shows the newest picture and reads the keys, from the drawing thread only (_ui_thread): on macOS the camera thread
+        only prepares the picture (self._disp) and this is called for every G-code line and while waiting for the machine."""
+        if not self.show or not self._ui_thread():
             return
         now = time.time()
         if now - self._last_pump < 0.03:
@@ -2550,8 +2557,7 @@ class LivePreview:
             self.show_plan = not self.show_plan
 
     def _close_window(self):
-        import threading
-        if self._win_open and threading.current_thread() is threading.main_thread():
+        if self._win_open and self._ui_thread():
             try:
                 cv2.destroyWindow(self.win)
                 cv2.waitKey(1)
@@ -2654,6 +2660,7 @@ class LivePreview:
                                          time.strftime("%H:%M:%S"), frac, done=self.done, frozen=same > 45, t=el)
                     if themed is not None:
                         self._disp = self.glass.apply(themed)
+                        self.pump()                                 # draws here except on macOS
                         time.sleep(0.03)
                         continue
                 bar = disp.copy()
@@ -2670,7 +2677,8 @@ class LivePreview:
                 cv2.putText(disp, time.strftime("%H:%M:%S"), (w - 170, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
                 if same > 45:                                       # about 1.5 s of exactly identical frames
                     cv2.putText(disp, "CAMERA PICTURE FROZEN?", (w // 2 - 230, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 4, cv2.LINE_AA)
-                self._disp = disp                                   # shown by pump() on the main thread
+                self._disp = disp                                   # shown by pump(): here, or on macOS by the main thread
+                self.pump()
                 if not self.show and not self.record:
                     break
                 time.sleep(0.03)
@@ -2684,7 +2692,7 @@ class LivePreview:
                 print(f"time-lapse: {self.record} ({self.rec_frames} frames)")
             if cap is not None:
                 cap.release()
-            # no cv2.destroyAllWindows() here: this is not the main thread (macOS stops the program); stop() closes the window
+            self._close_window()      # only where this thread draws; on macOS stop() closes it from the main thread
 
 
 def _gif_frame(frame, paper_poly, n, total):
