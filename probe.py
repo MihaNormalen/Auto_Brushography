@@ -844,6 +844,10 @@ def _set_status(text):
 def pick_dish(pools, color, cfg):
     near = lambda p: np.hypot(p["center_mm"][0] - cfg["dip_x"], p["center_mm"][1] - cfg["dip_y"]) <= cfg["palette_radius"]
     ok = [p for p in pools if p["roundness"] >= cfg["min_roundness"] and p["area_mm2"] >= cfg["min_pool_area"] and near(p)]
+    cups = getattr(S, "CUPS", None) or {}
+    if color in ("black", "auto") and "black" in cups:           # a fixed holder: black is where its cup is (nothing to find by colour)
+        bx, by = cups["black"]
+        return float(bx), float(by), 0.5 * float(getattr(S, "CUP_WIDTH_MM", 16.2))
     if color == "black":                                         # black: the dark pool (vision.find_pools marks it)
         cands = sorted([p for p in ok if p.get("dark")], key=lambda p: -p["area_mm2"])
     else:

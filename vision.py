@@ -864,4 +864,34 @@ def find_pools(frame, H, exclude_poly_px=None, exclude_mm=None, min_area_mm2=100
                     "area_mm2": area_mm2, "bgr": [int(v) for v in np.median(frame[m], axis=0)],
                     "hue": circular_mean_hue(hh[m]), "sat": float(np.median(ss[m])), "dark": True,
                     "roundness": _roundness(filled)})
-    return sorted(out, key=lambda d: -d["area_mm2"])
+    return _snap_to_cups(sorted(out, key=lambda d: -d["area_mm2"]))
+
+
+def _snap_to_cups(pools):
+    """With a fixed holder (CUPS in settings.py) the camera only tells WHICH paint is in which cup; where the cups are is known
+    better from the holder than from a picture (the containers sit at the edge of the view, where a rough calibration is off by
+    10 mm and more). Each pool within half a cup spacing (X) and a cup length (Y) of a colour cup is moved onto that cup, with
+    the cup's free half-width as its radius; the biggest pool per cup is kept. Pools elsewhere - paint tubes, the holder's own
+    pink plastic, the water cup - are dropped. Without CUPS the pools are returned unchanged."""
+    import settings as _S
+    cups = dict(getattr(_S, "CUPS", None) or {})
+    if not cups:
+        return pools
+    xs = sorted(c[0] for c in cups.values())
+    half = 0.5 * min(np.diff(xs)) if len(xs) > 1 else 16.0
+    length = float(getattr(_S, "CUP_LENGTH_MM", 23.5))
+    best = {}
+    for p in pools:
+        x, y = p["center_mm"]
+        name, (cx, cy) = min(cups.items(), key=lambda kv: math.hypot(x - kv[1][0], y - kv[1][1]))
+        if name == "water" or abs(x - cx) > half or abs(y - cy) > length:
+            continue
+        if bool(p.get("dark")) != (name == "black"):            # the black cup holds the dark pool, a colour cup never does
+            continue                                            # (2026-11-07: the holder's pink rim beat the black paint by area)
+        score = p["area_mm2"] * min(float(p.get("roundness", 1.0)), 1.0)    # a filled cup beats a ragged scrap of pink holder
+        if name not in best or score > best[name]["_score"]:
+            p = dict(p, _score=score)
+            q = dict(p, camera_mm=p["center_mm"], center_mm=(float(cx), float(cy)), cup=name,
+                     radius_mm=0.5 * float(getattr(_S, "CUP_WIDTH_MM", 16.2)))
+            best[name] = q
+    return sorted(best.values(), key=lambda d: -d["area_mm2"])

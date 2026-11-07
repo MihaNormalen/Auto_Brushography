@@ -134,6 +134,24 @@ WATER_Y = None
 WATER_R = 15.0
 
 
+# =============================== 5b. A FIXED HOLDER OF CUPS (instead of dishes found by the camera) ===================
+# For a printed holder whose cups have stairs in the floor (openBrushograph's "modern" CMYK holder, as ../brushograph's
+# copicograf loads it): a pickup goes down at the deep end and swipes up the stairs (paint.py _cup_pickup). The camera then
+# only says which paint is in which cup; the positions are CUPS. The default here: none (dishes found by the camera).
+CUP_SHAPE = None           # "modern" = the holder above; None = round dishes found by the camera (spiral dip + rim wipe)
+CUPS = {}                  # machine mm of each cup's centre, e.g. {"water": (16, 2), "cyan": (53, 2), ..., "black": (149, 2)}
+CUP_LENGTH_MM = 23.5       # the swipe's length inside a cup (along Y)
+CUP_WIDTH_MM = 16.2        # a colour cup's inside width (along X)
+CUP_WIDTH_WATER_MM = 27.6
+CUP_OUTSIDE_LENGTH_MM = 35.0   # outside the walls: the brush stays at CUP_LIFT_Z until it is past this
+CUP_DIP_LANES = 5          # pickups spread over this many places across a cup (mixes the paint)
+CUP_Y_FLOOR = 0.0          # a deep end past this Y (the stop) is clamped to it: the brush goes down here and the swipe is shorter
+CUP_DWELL_S = 0.15         # stand on the floor this long before the swipe
+CUP_DIP_Z = 1.0            # machine Z (NOT relative to the touch: the cup floor does not move with the brush): down to here ...
+CUP_EXIT_Z = 8.2           # ... and up the stairs to here
+CUP_LIFT_Z = 12.0          # over the rims
+
+
 # =============================== 6. THE WATER DISH (training) AND THE FALLBACK DISH ==================
 DIP_X = 148.0              # position of the water dish (training); paint.py uses it for colours with no dish (black, white)
 DIP_Y = 0.0
