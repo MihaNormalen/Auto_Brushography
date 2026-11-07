@@ -35,6 +35,7 @@ while True:
     if time.time() - t0 >= 1:
         fps, n, t0 = n / (time.time() - t0), 0, time.time()
     h, w = frame.shape[:2]
+    raw = frame.copy()                       # S saves the camera picture without the text / crosshair drawn below
     if cross:
         cv2.line(frame, (w//2, 0), (w//2, h), (0, 255, 0), 1)
         cv2.line(frame, (0, h//2), (w, h//2), (0, 255, 0), 1)
@@ -44,7 +45,7 @@ while True:
     cv2.imshow(win, frame)
     k = cv2.waitKey(1) & 0xFF
     if k in (ord('q'), 27): break
-    if k == ord('s'): cv2.imwrite("preview_snapshot.png", frame); print("saved preview_snapshot.png")
+    if k == ord('s'): cv2.imwrite("preview_snapshot.png", raw); print("saved preview_snapshot.png")
     if k == ord('x'): cross = not cross
     if k == ord('f'): info = not info
 cap.release(); cv2.destroyAllWindows()
