@@ -143,6 +143,9 @@ class FluidNCLink(LerdgeSerial):
       G0 / G1    -> G1 at the current feed (Marlin runs G0 at the feed too; FluidNC would run it at max rate), never faster
                     than FLUIDNC_MAX_FEED: the small steppers lose steps at full speed (2026-11-07: 2.6 mm lost in two loops at
                     2000 mm/min, nothing at 600)
+    BACKLASH_MM: the play in X and Y. Each axis remembers which way it last moved; when a move reverses it, a take-up move
+    (that axis only, by the play) goes first, and while an axis moves in - its coordinates are sent shifted by the play.
+    Reference: the + side, which is how zero.g leaves both axes (its last moves are +X +Y).
     Every G0/G1 target outside MACHINE_LIMITS_MM is refused (like a firmware error): without limit switches nothing else stops
     the machine from running into its ends."""
 
@@ -157,6 +160,9 @@ class FluidNCLink(LerdgeSerial):
         self.sock, self._buf = None, b""
         self._said_no_homing = False
         self.max_feed = float(getattr(S, "FLUIDNC_MAX_FEED", None) or float("inf"))   # None = no cap
+        self.backlash = {k: float(v) for k, v in (getattr(S, "BACKLASH_MM", None) or {}).items() if k in "XY" and v}
+        self.pos = {}                                # where the programs' G-code has put each axis (machine mm, uncompensated)
+        self.dir = {"X": 1, "Y": 1}                  # which way each axis last moved
         self.feed = min(self.max_feed, float(FEED_TRAVEL))   # the modal feed rate of the programs' G-code (mm/min)
 
     def connect(self):
@@ -173,7 +179,9 @@ class FluidNCLink(LerdgeSerial):
         print("Connected.")
         info = self.query('$I', timeout=5)
         print(f"Firmware: {info.splitlines()[0][:120] if info else '?'}")
-        state = self.status()
+        rep = self.report()
+        state = rep[1:].split("|", 1)[0].rstrip(">")
+        self._take_position(rep)
         print(f"State: {state}")
         if state.startswith(("Alarm", "Door")):
             raise SystemExit(f"STOPPED: FluidNC is in {state}. Check where the head is, unlock it ($X in the WebUI or the console) "
@@ -242,6 +250,17 @@ class FluidNCLink(LerdgeSerial):
         """The machine state from a '?' status report: Idle, Run, Hold:0, Alarm, ... ('' if none came)."""
         return self.report(timeout)[1:].split("|", 1)[0].rstrip(">")
 
+    def _take_position(self, rep):
+        """Starts the backlash bookkeeping from a status report: the axes as FluidNC has them, both last moved in +."""
+        m = re.search(r"WPos:(-?[\d.]+),(-?[\d.]+),(-?[\d.]+)", rep or "")
+        if m:
+            self.pos = {"X": float(m.group(1)), "Y": float(m.group(2)), "Z": float(m.group(3))}
+            self.dir = {"X": 1, "Y": 1}
+
+    def _phys(self, ax, v, d):
+        """The coordinate actually sent for machine position v while the axis moves in direction d."""
+        return v - self.backlash.get(ax, 0.0) if d < 0 else v
+
     def run_macro(self, name, timeout=240.0):
         """Runs a G-code file from FluidNC's SD card and waits until it has finished (while a file runs, the status report
         carries an SD: field; between two of its lines the state can read Idle for a moment)."""
@@ -262,6 +281,7 @@ class FluidNCLink(LerdgeSerial):
                 if errs:
                     raise SystemExit(f"STOPPED: FluidNC reported a problem running {name}: {errs[-1].strip()}")
                 print(f"  {name} done: {r}")
+                self._take_position(r)
                 return r
             time.sleep(0.25)
         raise SystemExit(f"STOPPED: {name} did not finish within {timeout:.0f} s.")
@@ -319,8 +339,22 @@ class FluidNCLink(LerdgeSerial):
                 lo, hi = self.limits[ax] if self.limits else (-1e9, 1e9)
                 if not lo <= float(v) <= hi:
                     return [f"<refuse>{ax} {float(v):.1f} is outside MACHINE_LIMITS_MM ({lo:g} to {hi:g}): {line}"]
-            axes = " ".join(f"{a}{words[a]}" for a in "XYZ" if a in words)
-            return [f"G1 {axes} F{min(self.feed, self.max_feed):g}"]
+            feed = f"F{min(self.feed, self.max_feed):g}"
+            out, take = [], {}
+            for ax in "XY":
+                if ax in words and ax in self.pos and self.backlash.get(ax):
+                    d = float(words[ax]) - self.pos[ax]
+                    nd = 1 if d > 1e-6 else -1 if d < -1e-6 else self.dir[ax]
+                    if nd != self.dir[ax]:
+                        self.dir[ax] = nd
+                        take[ax] = self._phys(ax, self.pos[ax], nd)      # reversal: take up the play first, in place
+            if take:
+                out.append("G1 " + " ".join(f"{a}{v:.3f}" for a, v in take.items()) + f" {feed}")
+            sent = {a: (self._phys(a, float(v), self.dir[a]) if a in "XY" and a in self.pos else float(v)) for a, v in words.items()}
+            for a, v in words.items():
+                self.pos[a] = float(v)
+            axes = " ".join(f"{a}{sent[a]:.3f}" for a in "XYZ" if a in sent)
+            return out + [f"G1 {axes} {feed}"]
         return [line]
 
     def _send_raw(self, line, wait_ok=True, timeout=None):

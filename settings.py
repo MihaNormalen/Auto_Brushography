@@ -152,6 +152,7 @@ FLUIDNC_HOMING = False     # True: real homing ($HZ, then $HXY) - only with homi
                            #   macro: the position FluidNC keeps is used as it is (no limit switches)
 FLUIDNC_MAX_FEED = None    # mm/min: no move runs faster on FluidNC (small steppers lose steps at its max rate). None = no cap.
                            #   FluidNC runs G0 at its max rate; the programs' G0 F... is honoured as a feed instead
+BACKLASH_MM = {}           # FluidNC only: the play in each axis, e.g. {"X": 1.6, "Y": 1.8}, compensated while sending. {} = off
 MACHINE_LIMITS_MM = None   # FluidNC only: {"X": (lo, hi), "Y": (lo, hi), "Z": (lo, hi)} - a move outside is refused (not sent).
                            #   Without limit switches nothing else stops the head running into the ends. None = no check
 
