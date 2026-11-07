@@ -1,4 +1,4 @@
-# Brushography: a camera-guided brush plotter
+# Brushography: a camera-guided brushograph
 
 Python software that turns a black-and-white (or few-colour) picture into real brush strokes on paper. The machine is a
 G-code plotter with a paint brush in place of a pen. A camera looks down at the table, so the program knows where the
