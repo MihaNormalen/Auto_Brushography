@@ -138,7 +138,8 @@ class FluidNCLink(LerdgeSerial):
       M204       -> nothing: FluidNC takes the acceleration from its own config (acceleration_mm_per_sec2)
       M115       -> $I (firmware info)
       G4 P<ms>   -> G4 P<seconds> (Grbl's P is seconds)
-      G28 <axes> -> $H<axes> if FLUIDNC_HOMING, else nothing: without limit switches the position FluidNC keeps is used
+      G28 <axes> -> FLUIDNC_ZERO_MACRO (zero.g on the SD card: drives into the end stops and sets X/Y/Z from them), once per
+                    connection; else $H<axes> if FLUIDNC_HOMING; else nothing (the position FluidNC keeps is used)
       G0 / G1    -> G1 at the current feed (Marlin runs G0 at the feed too; FluidNC would run it at max rate), never faster
                     than FLUIDNC_MAX_FEED: the small steppers lose steps at full speed (2026-11-07: 2.6 mm lost in two loops at
                     2000 mm/min, nothing at 600)
@@ -150,6 +151,8 @@ class FluidNCLink(LerdgeSerial):
         self.host = host or S.FLUIDNC_HOST
         self.tcp_port = port or getattr(S, "FLUIDNC_PORT", 23)
         self.homing = bool(getattr(S, "FLUIDNC_HOMING", False))
+        self.zero_macro = getattr(S, "FLUIDNC_ZERO_MACRO", None)
+        self._zeroed = False
         self.limits = getattr(S, "MACHINE_LIMITS_MM", None)
         self.sock, self._buf = None, b""
         self._said_no_homing = False
@@ -206,28 +209,62 @@ class FluidNCLink(LerdgeSerial):
         line, self._buf = self._buf.split(b"\n", 1)
         return line.decode('ascii', errors='replace').strip()
 
-    def _drain(self):
+    def _drain(self) -> str:
+        """Throws away whatever the controller has sent and nobody has read; returns it (for the log)."""
+        got = self._buf
         self.sock.settimeout(0.2)
         try:
-            while self.sock.recv(4096):
-                pass
+            while True:
+                d = self.sock.recv(4096)
+                if not d:
+                    break
+                got += d
         except (socket.timeout, BlockingIOError):
             pass
         self.sock.settimeout(1.0)
         self._buf = b""
+        return got.decode("ascii", errors="replace")
 
-    def status(self, timeout=3.0):
-        """The machine state from a '?' status report: Idle, Run, Hold:0, Alarm, ... ('' if none came)."""
+    def report(self, timeout=3.0):
+        """The whole '?' status report, e.g. <Idle|WPos:0.000,156.000,12.000|FS:0,0> ('' if none came)."""
         with self._lock:
             self._write(b"?")
             end = time.time() + timeout
             while time.time() < end:
                 raw = self._readline()
                 if raw.startswith("<"):
-                    return raw[1:].split("|", 1)[0].rstrip(">")
+                    return raw
                 if raw:
                     self._log.append(f"<< {raw}")
         return ''
+
+    def status(self, timeout=3.0):
+        """The machine state from a '?' status report: Idle, Run, Hold:0, Alarm, ... ('' if none came)."""
+        return self.report(timeout)[1:].split("|", 1)[0].rstrip(">")
+
+    def run_macro(self, name, timeout=240.0):
+        """Runs a G-code file from FluidNC's SD card and waits until it has finished (while a file runs, the status report
+        carries an SD: field; between two of its lines the state can read Idle for a moment)."""
+        print(f"  running {name} on the controller...")
+        self.last_error = None
+        self._send_raw(f"$SD/Run={name}", wait_ok=False)     # FluidNC answers ok only when the file has ENDED
+        end, started = time.time() + timeout, time.time()
+        while time.time() < end:
+            r = self.report()
+            busy = "|SD:" in r or not r.startswith("<Idle")
+            if r.startswith(("<Alarm", "<Door")):
+                raise SystemExit(f"STOPPED: FluidNC went into {r} while running {name}.")
+            if not busy and time.time() - started > 1.0:
+                time.sleep(0.3)
+                with self._lock:
+                    late = self._drain()                  # its late ok (or error) must not answer the next command
+                errs = [l for l in late.splitlines() + self._log[-20:] if "error" in l.lower() or "alarm" in l.lower()]
+                if errs:
+                    raise SystemExit(f"STOPPED: FluidNC reported a problem running {name}: {errs[-1].strip()}")
+                print(f"  {name} done: {r}")
+                return r
+            time.sleep(0.25)
+        raise SystemExit(f"STOPPED: {name} did not finish within {timeout:.0f} s.")
 
     def wait_idle(self, timeout=120.0):
         end = time.time() + timeout
@@ -259,6 +296,11 @@ class FluidNCLink(LerdgeSerial):
             return [f"G4 P{max(sec, 0.01):.3f}"]
         if cmd == "G28":
             axes = "".join(c for c in "".join(words[1:]).upper() if c in "XYZ")
+            if self.zero_macro:
+                if self._zeroed:
+                    return []                        # zero.g did all axes at once
+                self._zeroed = True
+                return ["<macro>" + self.zero_macro]
             if self.homing:
                 return [f"$H{axes}"]
             if not self._said_no_homing:
@@ -282,6 +324,9 @@ class FluidNCLink(LerdgeSerial):
         return [line]
 
     def _send_raw(self, line, wait_ok=True, timeout=None):
+        if line.startswith("<macro>"):
+            self.run_macro(line[len("<macro>"):])
+            return ''
         if line == "<idle>":
             self.wait_idle(timeout or 120)
             return ''
