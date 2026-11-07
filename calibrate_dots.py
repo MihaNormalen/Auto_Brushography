@@ -86,6 +86,11 @@ def pick_dish(pools, color, cfg):
         if dark:
             print(f"dots painted with black (the dark dish at X {dark[0]['center_mm'][0]:.0f} Y {dark[0]['center_mm'][1]:.0f})")
             return dark[0]["center_mm"][0], dark[0]["center_mm"][1], dark[0]["radius_mm"]
+        cups = getattr(S, "CUPS", None) or {}
+        if "black" in cups:                                     # a fixed holder: black is where its cup is (no colour to find)
+            bx, by = cups["black"]
+            print(f"dots painted with black (the black cup of CUPS at X {bx:.0f} Y {by:.0f})")
+            return float(bx), float(by), 0.5 * float(getattr(S, "CUP_WIDTH_MM", 16.2))
         if color == "auto":
             color = "blue" if any(PT.hue_name(p["hue"]) == "blue" for p in dishes) else (PT.hue_name(dishes[0]["hue"]) if dishes else "blue")
             print(f"no black dish: the dots are painted with {color}")
