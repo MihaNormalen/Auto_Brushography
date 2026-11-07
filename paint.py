@@ -2498,14 +2498,61 @@ class LivePreview:
         self.show_plan = True
         self.thread = None
         self.latest = None                                         # the newest camera frame (the photos take it from here)
+        self.win = "paint - painting (Q closes this window, O planned strokes on/off)"
+        self._disp, self._shown, self._win_open, self._last_pump = None, None, False, 0.0
 
     def start(self):
         import threading
+        import machine as _mc
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
+        _mc.WAIT_HOOK = self.pump                                  # the main thread shows the window while it waits for the machine
 
     def update(self, i, layer, dips, est_done):
         self.i, self.layer, self.dips, self.est_done = i, layer, dips, est_done
+        self.pump()
+
+    def pump(self):
+        """Shows the newest picture and reads the keys. Only from the MAIN thread (macOS draws windows nowhere else): the camera
+        thread only prepares the picture (self._disp); this is called for every G-code line and while waiting for the machine."""
+        import threading
+        if not self.show or threading.current_thread() is not threading.main_thread():
+            return
+        now = time.time()
+        if now - self._last_pump < 0.03:
+            return
+        self._last_pump = now
+        disp = self._disp
+        if disp is None:
+            return
+        try:
+            if not self._win_open:
+                cv2.namedWindow(self.win, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow(self.win, 1280, 720)
+                self._win_open = True
+            if disp is not self._shown:
+                cv2.imshow(self.win, disp)
+                self._shown = disp
+            k = cv2.waitKey(1) & 0xFF
+        except Exception as e:                                     # painting must not depend on the window
+            print(f"(live preview not available: {e})")
+            self.show = False
+            return
+        if k in (ord("q"), ord("Q"), 27):
+            self.show = False                                       # the window goes; a time-lapse keeps recording
+            self._close_window()
+        if k in (ord("o"), ord("O")):
+            self.show_plan = not self.show_plan
+
+    def _close_window(self):
+        import threading
+        if self._win_open and threading.current_thread() is threading.main_thread():
+            try:
+                cv2.destroyWindow(self.win)
+                cv2.waitKey(1)
+            except Exception:
+                pass
+            self._win_open = False
 
     def finish(self, wait_s=20.0):
         """Painting is over: show 'finished' for a while (or until Q), then close."""
@@ -2513,14 +2560,19 @@ class LivePreview:
         if not self.show:
             wait_s = 0.0                                              # no window to look at: just finish the recording
         t = time.time()
-        while self.thread and self.thread.is_alive() and time.time() - t < wait_s:
-            time.sleep(0.2)
+        while self.thread and self.thread.is_alive() and self.show and time.time() - t < wait_s:
+            self.pump()
+            time.sleep(0.03)
         self.stop()
 
     def stop(self):
+        import machine as _mc
+        if _mc.WAIT_HOOK == self.pump:
+            _mc.WAIT_HOOK = None
         self.stop_flag = True
         if self.thread:
             self.thread.join(timeout=3)
+        self._close_window()
 
     def _plan_layer(self, shape):
         """The planned strokes (or the artwork's marks, OVERLAY_SHOW "art") drawn once on a transparent layer in camera pixels."""
@@ -2544,16 +2596,12 @@ class LivePreview:
         return img, mask > 0
 
     def _loop(self):
-        win = "paint - painting (Q closes this window, O planned strokes on/off)"
         cap = None
         writer, last_rec, last_small = None, 0.0, None
         every = float(getattr(S, "TIMELAPSE_EVERY_S", 2.0))
         try:
             from vision import open_camera
             cap = None if self.grabber is not None else open_camera(verbose=False)
-            if self.show:
-                cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-                cv2.resizeWindow(win, 1280, 720)
             layer_img = layer_mask = None
             prev_small, same = None, 0
             while not self.stop_flag:
@@ -2606,15 +2654,10 @@ class LivePreview:
                 cv2.putText(disp, time.strftime("%H:%M:%S"), (w - 170, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
                 if same > 45:                                       # about 1.5 s of exactly identical frames
                     cv2.putText(disp, "CAMERA PICTURE FROZEN?", (w // 2 - 230, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 4, cv2.LINE_AA)
-                cv2.imshow(win, disp)
-                k = cv2.waitKey(1) & 0xFF
-                if k in (ord("q"), ord("Q"), 27):
-                    if not self.record:
-                        break
-                    self.show = False                                   # the window goes, the camera keeps recording the time-lapse
-                    cv2.destroyWindow(win)
-                if k in (ord("o"), ord("O")):
-                    self.show_plan = not self.show_plan
+                self._disp = disp                                   # shown by pump() on the main thread
+                if not self.show and not self.record:
+                    break
+                time.sleep(0.03)
         except Exception as e:                                           # no window / camera busy: painting must not depend on it
             print(f"(live preview not available: {e})")
         finally:
@@ -2625,10 +2668,7 @@ class LivePreview:
                 print(f"time-lapse: {self.record} ({self.rec_frames} frames)")
             if cap is not None:
                 cap.release()
-            try:
-                cv2.destroyAllWindows()
-            except Exception:
-                pass
+            # no cv2.destroyAllWindows() here: this is not the main thread (macOS stops the program); stop() closes the window
 
 
 def _gif_frame(frame, paper_poly, n, total):
