@@ -2592,7 +2592,7 @@ class LivePreview:
             print(f"(live preview not available: {e})")
             self.show = False
             return
-        if k in (ord("q"), ord("Q"), 27):
+        if k in (ord("q"), ord("Q")):                              # not Esc: on macOS Esc leaves full screen and reaches this window too
             self.show = False                                       # the window goes; a time-lapse keeps recording
             self._close_window()
         if k in (ord("o"), ord("O")):
