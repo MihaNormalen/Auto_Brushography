@@ -2459,7 +2459,7 @@ def go_to_snapshot(machine, cfg, settle=1.0):
     vprint(f"moving the toolhead out of the camera's view: X {sx:.0f} Y {sy:.0f}")
     mc.park(machine, sx, sy, cfg["z_high"], feed=cfg["feed"], accel=cfg["accel_travel"], timeout=60)
     machine.flush_motion()
-    time.sleep(settle)                                         # let the picture settle (exposure, vibration)
+    _pump_sleep(settle)                                        # let the picture settle (exposure, vibration)
 
 
 def capture_fresh(cap, max_s=6.0):
@@ -2528,13 +2528,19 @@ def command_table(code):
 
 class LivePreview:
     """Camera window while the machine paints - made for screen recording: the live picture, the planned strokes
-    (faint, key O switches them off), the layer, progress, elapsed and remaining time. Q closes only this window."""
+    (faint, key O switches them off), the layer, progress, elapsed and remaining time. Q closes only this window; R (or
+    Enter) ends a drying wait (dry_wait)."""
     def __init__(self, plan, total, total_est, grabber=None, show=True, record=None, crop=None):
         self.grabber, self.show = grabber, show                    # grabber: the camera is held by check.py and shared; show False = no window at all
         self.record, self.crop = record, crop                      # record: time-lapse video file (TIMELAPSE); crop: (x0, y0, x1, y1) camera px
         self.rec_frames = 0
         self.plan, self.total, self.total_est = plan, total, max(total_est, 1.0)
         self.layer, self.dips, self.est_done, self.i = "", 0, 0.0, 0
+        # the bar covers the WHOLE job: the painting, then the drying and the repair passes (phase()). est_done counts up within
+        # the current phase in its own estimated seconds; phase_pace = real seconds per estimated second expected for it (None =
+        # not known yet: it shows its own pace after a while); tail = what is still expected after this phase: (painting in
+        # estimated seconds, fixed real seconds such as the drying, the painting's pace or None = this phase's)
+        self.stage, self.phase_s, self.phase_pace, self.phase_t0, self.tail = "", self.total_est, None, None, (0.0, 0.0, None)
         self.t0 = time.time()
         self.stop_flag = self.done = False
         self.show_plan = True
@@ -2557,7 +2563,39 @@ class LivePreview:
 
     def update(self, i, layer, dips, est_done):
         self.i, self.layer, self.dips, self.est_done = i, layer, dips, est_done
+        if self.phase_t0 is None:
+            self.phase_t0 = time.time()                             # the painting starts with its first line, not with the window
         self.pump()
+
+    def phase(self, stage, est_s, pace=None, tail=(0.0, 0.0, None), total_lines=0):
+        """The next part of the job begins (a drying, a repair pass). est_s = its length in its own estimated seconds, pace = real
+        seconds per estimated second (None = not known), tail = what is expected after it (see __init__)."""
+        self.stage, self.phase_s, self.phase_pace, self.tail = stage, max(float(est_s), 1.0), pace, tail
+        self.phase_t0 = time.time()
+        self.est_done, self.i, self.total, self.dips, self.layer = 0.0, 0, total_lines, 0, ""
+
+    def progress(self):
+        """(share of the whole job done, real seconds still expected - None while there is nothing to go on yet)"""
+        if self.done:
+            return 1.0, 0.0
+        now = time.time()
+        el = now - self.t0
+        pace = self.phase_pace
+        if (self.stage != "drying" and self.phase_t0 is not None and self.est_done > 0.02 * self.phase_s
+                and now - self.phase_t0 > 20.0):
+            pace = (now - self.phase_t0) / self.est_done             # this phase's own pace so far beats any forecast
+        if pace is None:
+            return min(1.0, self.est_done / self.phase_s), None
+        t_est, t_fixed, t_pace = self.tail
+        left = max(self.phase_s - self.est_done, 0.0) * pace + t_est * (t_pace or pace) + t_fixed
+        return min(1.0, el / max(el + left, 1.0)), left
+
+    def title(self):
+        if self.done:
+            return "FINISHED"
+        if self.stage == "drying":
+            return "drying (R = go on now)"
+        return (f"{self.stage}  " if self.stage else "") + f"layer: {self.layer or '-'}"
 
     def _ui_thread(self):
         """Is this the thread that draws the window? On macOS the MAIN one (it draws windows nowhere else). Elsewhere the camera
@@ -2597,6 +2635,9 @@ class LivePreview:
             self._close_window()
         if k in (ord("o"), ord("O")):
             self.show_plan = not self.show_plan
+        if k in (ord("r"), ord("R"), 13, 10):
+            global SKIP_WAIT
+            SKIP_WAIT = True                                        # dry_wait() reads this: R / Enter in the window ends the drying now
 
     def _close_window(self):
         if self._win_open and self._ui_thread():
@@ -2690,15 +2731,16 @@ class LivePreview:
                         layer_img, layer_mask = self._plan_layer(frame.shape)
                     disp[layer_mask] = (0.65 * disp[layer_mask] + 0.35 * layer_img[layer_mask]).astype(np.uint8)
                 h, w = disp.shape[:2]
-                frac = 1.0 if self.done else min(1.0, self.est_done / self.total_est)
+                frac, left = self.progress()                        # the whole job: painting, drying, repairs
                 el = time.time() - self.t0
-                left = (el * (1 - frac) / frac) if frac > 0.02 else None
                 if self.hx:                                         # the h4xx0r theme: its lettering, then the glass over all of it
                     small = cv2.resize(disp, (1280, int(round(1280 * h / w))), interpolation=cv2.INTER_AREA)
                     info = (f"t+{int(el // 60):02d}:{int(el % 60):02d}" +
                             (f"  eta {int(left // 60):02d}:{int(left % 60):02d}" if left is not None and not self.done else "") +
                             f"  dips {self.dips}  line {self.i}/{self.total}")
-                    themed = self.hx.hud(small, "job complete" if self.done else f"layer::{self.layer or '-'}", info,
+                    label = ("job complete" if self.done else "drying::press_R" if self.stage == "drying" else
+                             (f"{self.stage.replace(' ', '_')}::" if self.stage else "layer::") + (self.layer or "-"))
+                    themed = self.hx.hud(small, label, info,
                                          time.strftime("%H:%M:%S"), frac, done=self.done, frozen=same > 45, t=el)
                     if themed is not None:
                         self._disp = self.glass.apply(themed)
@@ -2710,7 +2752,7 @@ class LivePreview:
                 cv2.rectangle(bar, (0, h - 22), (w, h), (0, 0, 0), -1)
                 disp = cv2.addWeighted(bar, 0.6, disp, 0.4, 0)
                 cv2.rectangle(disp, (0, h - 22), (int(w * frac), h), (0, 200, 0), -1)
-                title = "FINISHED" if self.done else f"layer: {self.layer or '-'}"
+                title = self.title()
                 info = (f"{100 * frac:.0f}%   elapsed {int(el // 60):02d}:{int(el % 60):02d}" +
                         (f"   about {int(left // 60):02d}:{int(left % 60):02d} left" if left is not None and not self.done else "") +
                         f"   dips {self.dips}   line {self.i}/{self.total}")
@@ -2754,20 +2796,41 @@ def _gif_frame(frame, paper_poly, n, total):
     return im
 
 
-def dry_wait(minutes, label):
-    """Waits for the paint to dry, with a countdown in this window every minute. Press R (or Enter) here to go on at once.
-    Ctrl+C still stops the program."""
-    end = time.time() + minutes * 60.0
-    print(f"\n   DRYING before the picture of {label}: {minutes:g} min. Press R (or Enter) here to continue now.")
+SKIP_WAIT = False                                                 # set by R / Enter in the live camera window
+
+
+def dry_wait(minutes, label, preview=None, tail=(0.0, 0.0, None)):
+    """Waits for the paint to dry, with a countdown here every 5 minutes. R (or Enter) in the live camera window, or Enter in
+    this terminal (Windows: R or Enter), goes on at once. Ctrl+C still stops the program.
+    preview: the live window, whose bar counts the drying as part of the job (tail: what is expected after it, LivePreview)."""
+    global SKIP_WAIT
+    import sys
+    t_start = time.time()
+    end = t_start + minutes * 60.0
+    if preview is not None:
+        preview.phase("drying", minutes * 60.0, 1.0, tail)
+    print(f"\n   DRYING before the picture of {label}: {minutes:g} min. Press Enter here (or R in the camera window) to continue now.")
     try:
         import msvcrt                                   # Windows: reads the keyboard without waiting
     except ImportError:
         msvcrt = None
     while msvcrt is not None and msvcrt.kbhit():           # keys pressed earlier (the Enter after "Start painting now?") do not count
         msvcrt.getwch()
+    tty = None                                             # macOS / Linux: the terminal, read without waiting (select)
+    if msvcrt is None:
+        try:
+            import select, termios
+            if sys.stdin.isatty():
+                termios.tcflush(sys.stdin, termios.TCIFLUSH)   # keys typed earlier do not count either
+                tty = select
+        except Exception:
+            tty = None
+    SKIP_WAIT = False                                      # an R pressed earlier, while painting, does not count
     next_print = time.time()
     while True:
         left = end - time.time()
+        if preview is not None:
+            preview.est_done = time.time() - t_start
         if left <= 0:
             print("   drying finished: taking the picture")
             return
@@ -2779,7 +2842,151 @@ def dry_wait(minutes, label):
             if ch.lower() == "r" or ch in ("\r", "\n"):
                 print("   continued by you")
                 return
-        time.sleep(0.5)
+        if tty is not None and tty.select([sys.stdin], [], [], 0)[0]:
+            sys.stdin.readline()                           # a line typed here (Enter, or R + Enter)
+            print("   continued by you")
+            return
+        if SKIP_WAIT:
+            SKIP_WAIT = False
+            print("   continued by you")
+            return
+        _pump_sleep(0.5)
+
+
+def _pump_sleep(seconds):
+    """time.sleep that keeps the live camera window drawing. On macOS only the main thread can draw it (LivePreview.pump), so
+    while the main thread waits here (drying: minutes) it calls machine.WAIT_HOOK about 30 times a second; elsewhere the hook
+    does nothing and this is a plain sleep."""
+    end = time.time() + seconds
+    while True:
+        hook = getattr(mc, "WAIT_HOOK", None)
+        if hook is not None:
+            try:
+                hook()
+            except Exception:
+                pass
+        left = end - time.time()
+        if left <= 0:
+            return
+        time.sleep(min(0.03, left))
+
+
+def repair_stop(gaps):
+    """The stop rule of the gap repair, given the empty pixels seen so far (the finished sheet first, then after each pass):
+    the reason to stop here, or None (one more pass). 2026-11-08 readings, 1920x1080 camera: 17194 7048 3617 2712 2281 1994
+    1904 1872 and 1404 339 179 126 - from the 4th pass on each pass kept 84-98 % (specks the brush does not fill), about
+    2-3 min each, and the job had to be stopped by hand."""
+    g = gaps[-1]
+    if g < int(getattr(S, "REPAIR_GAP_DONE_PX", 150)):
+        return "done"
+    if len(gaps) >= 2 and g > float(getattr(S, "REPAIR_MIN_PROGRESS", 0.8)) * gaps[-2]:
+        return "no real progress"
+    if len(gaps) - 1 >= int(getattr(S, "REPAIR_PASSES", 6)):
+        return "REPAIR_PASSES reached"
+    return None
+
+
+# ============================ PROGRESS OF THE WHOLE JOB (painting + drying + repairs) ============================
+HISTORY_FILE = "job_history.json"     # one entry per job: how long the painting and each repair pass took (the forecast learns)
+
+
+def _job_history():
+    import json
+    try:
+        h = json.load(open(HISTORY_FILE))
+        return [e for e in h if isinstance(e, dict) and e.get("main_est_s")][-20:]
+    except Exception:
+        return []
+
+
+def record_job(entry):
+    import json
+    try:
+        h = json.load(open(HISTORY_FILE))
+        if not isinstance(h, list):
+            h = []
+    except Exception:
+        h = []
+    h.append(dict(entry, when=time.strftime("%Y-%m-%d %H:%M:%S")))
+    try:
+        json.dump(h[-50:], open(HISTORY_FILE, "w"), indent=1)
+    except Exception as e:
+        print(f"(job history not saved: {e})")
+
+
+def _passes_by_rule(gaps):
+    """How many repair passes repair_stop() runs on a job's gap readings; None when the readings end before it stops (the job
+    was stopped by hand earlier: only a lower bound, not used)."""
+    for i in range(1, len(gaps) + 1):
+        if repair_stop(gaps[:i]):
+            return i - 1
+    return None
+
+
+def forecast_repairs(repairs_on=True):
+    """What the repairs at the end will probably take, from the jobs before (job_history.json), else from settings.py:
+    share = repair pass 1 / the painting (both estimated seconds), decay = each later pass / the one before, passes = how many
+    passes, pace / rep_pace = real seconds per estimated second of the painting / of the repairs, ratios = per pass, the share of
+    the empty pixels it leaves. Every old job is replayed through today's repair_stop(): a job that ran on until stopped by hand
+    does not teach 'expect 8 passes', and one stopped by hand before the rule ended it is no evidence for the count at all."""
+    hist = _job_history()
+    share = float(getattr(S, "PROGRESS_REPAIR_SHARE", 0.6))
+    decay = float(getattr(S, "PROGRESS_REPAIR_DECAY", 0.4))
+    passes = float(getattr(S, "PROGRESS_REPAIR_PASSES", 3))
+    pace = rep_pace = 1.0
+    ratios = []
+    if hist:
+        firsts = [e["repairs_est_s"][0] / e["main_est_s"] for e in hist if e.get("repairs_est_s")]
+        if firsts:
+            share = float(np.median(firsts))
+        counts, steps = [], []
+        for e in hist:
+            g, est = e.get("gaps_px") or [], e.get("repairs_est_s") or []
+            n = _passes_by_rule(g) if g else None
+            if n is not None:
+                counts.append(n)
+            keep = len(est) if n is None else n                        # only the passes the rule would have run
+            steps += [b / a for a, b in zip(est[:keep], est[1:keep]) if a > 0]
+            for j, (a, b) in enumerate(zip(g, g[1:])):                 # pass j + 1 left b of a's empty pixels
+                if a > 0:
+                    while len(ratios) <= j:
+                        ratios.append([])
+                    ratios[j].append(b / a)
+        if steps:
+            decay = float(np.clip(np.median(steps), 0.0, 0.95))
+        if counts:
+            passes = float(np.median(counts))
+        # real seconds per estimated second: the estimate ignores acceleration and the wait for every line's 'ok' (2026-11-08,
+        # a FluidNC machine over WiFi: x6 painting, x6.5 repairs - more short strokes, landings and lifts per estimated second)
+        mains = [e["main_real_s"] / e["main_est_s"] for e in hist if e.get("main_real_s")]
+        reps = [r / x for e in hist for x, r in zip(e.get("repairs_est_s", []), e.get("repairs_real_s", [])) if r and x > 0]
+        if mains or reps:
+            pace = float(np.clip(np.median(mains or reps), 0.3, 20.0))
+            rep_pace = float(np.clip(np.median(reps or mains), 0.3, 20.0))
+    dry = float(getattr(S, "DRY_WAIT_MIN", 20) or 0) * 60.0
+    return {"share": share, "decay": decay, "passes": int(round(passes)) if repairs_on else 0, "pace": pace,
+            "rep_pace": rep_pace, "ratios": [float(np.median(r)) for r in ratios], "dry_s": dry,
+            "from_history": len([e for e in hist if e.get("main_real_s")])}
+
+
+def passes_left(fc, gaps):
+    """With the empty pixels seen so far: how many more repair passes repair_stop() will probably run, each pass leaving the
+    share of empty pixels that pass left in the jobs before (fc['ratios'], the last one for later passes). Without readings from
+    jobs before: what is left of fc['passes'], at least this one more."""
+    if not fc["ratios"]:
+        return max(1, fc["passes"] - max(len(gaps) - 1, 0)) if gaps else fc["passes"]
+    g, n = list(gaps), 0
+    while not repair_stop(g) and n < 50:
+        g.append(g[-1] * fc["ratios"][min(len(g) - 1, len(fc["ratios"]) - 1)])
+        n += 1
+    return n
+
+
+def repair_tail(fc, from_pass, first_est):
+    """Repair passes from_pass .. fc['passes'] still expected: (their painting in estimated seconds - the first first_est, every
+    next one fc['decay'] times the one before -, the drying before each one's check photo in real seconds)."""
+    n = max(0, fc["passes"] - from_pass + 1)
+    return sum(first_est * fc["decay"] ** j for j in range(n)), n * fc["dry_s"]
 
 
 # ============================ REPAIR BY GAPS (the artwork against the photo) ============================
@@ -3266,19 +3473,60 @@ class Photos:
         except Exception as e:
             print(f"(GIF not made: {e}; the pictures are saved)")
 
+    def start_forecast(self, main_est_s):
+        """Before painting: what the drying and the repairs at the end will probably add, so the live window's bar covers the
+        whole job (forecast_repairs)."""
+        self.main_est_s, self.main_real_s = float(main_est_s), None
+        gaps = self.art is not None and self.H_inv is not None and getattr(S, "REPAIR_BY_GAPS", True)
+        self.fc = fc = forecast_repairs(bool(getattr(S, "REPAIR_AT_END", True)) and bool(self.dip_blocks) and gaps)
+        if not gaps:
+            fc["passes"], fc["dry_s"] = 0, 0.0                       # the stroke method: not forecast
+        known = fc["from_history"] > 0
+        t_est, t_dry = repair_tail(fc, 1, fc["share"] * self.main_est_s)
+        if self.preview is not None:
+            self.preview.phase_pace = fc["pace"] if known else None  # else the painting shows its own pace after a while
+            self.preview.tail = (t_est, fc["dry_s"] + t_dry, fc["rep_pace"] if known else None)
+        if fc["passes"]:
+            print(f"progress: about {fc['passes']} repair pass(es) expected after the drying"
+                  + (f", about {(t_est * fc['rep_pace'] + fc['dry_s'] + t_dry) / 60:.0f} min with the drying"
+                     f" (from the last {fc['from_history']} job(s))" if known else " (PROGRESS_REPAIR_* in settings.py: no job history yet)"))
+
     def _finish_by_gaps(self, machine):
+        """The repair passes (_repair_passes), then what they took is saved to job_history.json for the next job's forecast."""
+        self._rep_est, self._rep_real, self._gaps, self._rep_complete, self._rep_stop = [], [], [], False, "by hand"
+        try:
+            return self._repair_passes(machine)
+        finally:
+            if getattr(self, "main_est_s", None):
+                record_job({"main_est_s": round(self.main_est_s, 1), "main_real_s": self.main_real_s and round(self.main_real_s, 1),
+                            "repairs_est_s": [round(v, 1) for v in self._rep_est],
+                            "repairs_real_s": [v if v is None else round(v, 1) for v in self._rep_real],
+                            "gaps_px": self._gaps, "complete": self._rep_complete, "stopped": self._rep_stop})
+
+    def _repair_passes(self, machine):
         """End of job, gap method: photo of the finished sheet, the empty spots (artwork has colour, photo has none) are painted,
-        each colour from its own dish. Repeats (REPAIR_PASSES) while the empty spots keep going down."""
+        each colour from its own dish. Repeats (REPAIR_PASSES) while the empty spots keep going down (repair_stop). The live
+        window shows every pass, and its bar the drying and the passes still expected."""
+        pv = self.preview
+        fc = getattr(self, "fc", None) or forecast_repairs()
+        main_est, main_real = getattr(self, "main_est_s", 0.0) or 0.0, getattr(self, "main_real_s", None)
+        # real seconds per estimated second of a repair: from the jobs before, else this job's own painting
+        pace = fc["rep_pace"] if fc["from_history"] else (main_real / main_est if main_real and main_est else None)
+        e_next = fc["share"] * main_est                                       # estimated seconds of the next repair pass
+
+        def tail(from_pass, extra_s=0.0):                                     # the passes still expected, for the bar
+            t_est, t_dry = repair_tail(fc, from_pass, e_next)
+            return t_est, t_dry + extra_s, pace
+
         on = bool(getattr(S, "REPAIR_AT_END", True))
-        passes = int(getattr(S, "REPAIR_PASSES", 1000)) if on else 0          # no real limit: repairs go on until the gaps are filled or stop making progress
+        passes = int(getattr(S, "REPAIR_PASSES", 6)) if on else 0             # repair_stop() ends them: done, no real progress, or this many
         step = float(getattr(S, "REPAIR_STEP_MM", 0.15))
         deepest = float(getattr(S, "REPAIR_MAX_DEEPER_MM", 1.0))
-        done_px = int(getattr(S, "REPAIR_GAP_DONE_PX", 300))
         H = np.linalg.inv(self.H_inv)
         if not self.dip_blocks and passes:
             print("   (no dip cycle in the G-code: nothing repainted)")
             passes = 0
-        last = None
+        gaps = self._gaps
         self.prev_gap = None
         for k in range(passes + 1):
             name = "paint_final.png" if k == 0 else f"paint_repair{k}.png"
@@ -3286,7 +3534,7 @@ class Photos:
                 dry = float(getattr(S, "DRY_WAIT_MIN", 20) or 0)
                 if dry > 0:
                     go_to_snapshot(machine, self.cfg)
-                    dry_wait(dry, "the finished sheet" if k == 0 else f"after repair {k}")
+                    dry_wait(dry, "the finished sheet" if k == 0 else f"after repair {k}", pv, tail(k + 1))
                 go_to_snapshot(machine, self.cfg)
                 frame = self._frame()
                 cv2.imwrite(name, frame)
@@ -3297,6 +3545,7 @@ class Photos:
                                                      persist=(self.prev_gap if k >= 2 else None))
                 self.prev_gap = LAST_GAP
                 if lines is None:                                         # the paint is misplaced: nothing to repair safely
+                    self._rep_stop = "paint misplaced"
                     return
                 if LAST_GAP is not None:                                  # the picture of what is still empty (yellow)
                     ov = frame.copy()
@@ -3307,20 +3556,34 @@ class Photos:
                     cv2.imwrite(f"gap_{name[:-4]}_empty.png", ov)
             except Exception as e:
                 print(f"   (picture / gap check not done: {e})")
+                self._rep_stop = "no picture"
                 return
             label = "final" if k == 0 else f"after repair {k}"
             print(f"   {label}: {n_gap} empty pixels left (" + ", ".join(f"{v} {k}" for k, v in per.items()) + ")")
-            if k == passes or n_gap < done_px:
+            gaps.append(int(n_gap))
+            why = ("repairs off" if passes == 0 else "REPAIR_PASSES reached") if k == passes else repair_stop(gaps)
+            if why:
+                if k > 0:
+                    print(f"   repairs finished: {why} ({gaps[0]} -> {n_gap} empty pixels in {k} pass(es))")
+                self._rep_complete, self._rep_stop = True, why
                 break
-            if last is not None and n_gap > float(getattr(S, "REPAIR_MIN_PROGRESS", 0.75)) * last:
-                print("   no real progress: stopping the repairs here")
-                break
-            last = n_gap
+            fc["passes"] = k + passes_left(fc, gaps)                  # from here on the forecast follows this job's own readings
             print(f"REPAIR pass {k + 1}: empty spots painted, {extra:.2f} mm deeper")
             text = "\n".join(lines)
             if self.cfg.get("tool_offset"):                       # the repair lands like the painting: the same measured shift
                 text = shift_gcode_xy(text, -self.cfg["tool_offset"][0], -self.cfg["tool_offset"][1])
-            if not stream_gcode(machine, text, self.cfg, None, None, photos=None):
+            table, cum = command_table(text)
+            est = float(cum[-1]) if cum else 0.0
+            e_next = est * fc["decay"]                                # the next pass: this one, shrunk as in the jobs before
+            more = fc["passes"] - k - 1
+            print(f"   (about {more} more pass(es) expected after this one)" if more > 0 else "   (probably the last pass)")
+            if pv is not None:                                        # the bar: this pass, then its drying and the passes after it
+                pv.phase(f"repair {k + 1}", est, pace, tail(k + 2, fc["dry_s"]), len(table))
+            t_rep = time.time()
+            ok = stream_gcode(machine, text, self.cfg, pv, None, photos=None)
+            self._rep_est.append(est)
+            self._rep_real.append(time.time() - t_rep if ok else None)  # a pass stopped half way says nothing about the pace
+            if not ok:
                 print("   repair stopped by you or by the machine")
                 return
 
@@ -3354,7 +3617,7 @@ class Photos:
                 if dry > 0:
                     # gouache is glossy while wet: the camera reads the glare, so no judgement before the paint has dried
                     go_to_snapshot(machine, self.cfg)
-                    dry_wait(dry, "the finished sheet" if k == 0 else f"after repair {k}")
+                    dry_wait(dry, "the finished sheet" if k == 0 else f"after repair {k}", self.preview)
                 go_to_snapshot(machine, self.cfg)
                 frame = self._frame()
                 cv2.imwrite(name, frame)
@@ -3438,9 +3701,9 @@ class Photos:
             # same moment crashes Python in the camera driver (access violation)
             t = time.time()
             while getattr(pv, "latest", None) is None and thread.is_alive() and time.time() - t < 20.0:
-                time.sleep(0.1)
+                _pump_sleep(0.1)
             if getattr(pv, "latest", None) is not None:
-                time.sleep(settle)                           # the head has just stopped: let the live view show the settled sheet
+                _pump_sleep(settle)                          # the head has just stopped: let the live view show the settled sheet
                 return pv.latest.copy()
             if thread.is_alive():
                 raise RuntimeError("the live window has the camera but no picture yet")
@@ -4000,9 +4263,13 @@ def main(argv=None):
                 print("photos: not taken together with the touch check (--check)")
             if photos is not None:
                 photos.baseline(machine)
+                main_cum = command_table(code)[1]
+                photos.start_forecast(main_cum[-1] if main_cum else 0.0)       # the bar also counts the drying and the repairs
             try:
+                t_main = time.time()
                 done = stream_gcode(machine, code, cfg, preview, checker, photos=photos)
                 if done and photos is not None:
+                    photos.main_real_s = time.time() - t_main
                     photos.finish(machine)
             finally:
                 # the GIF is made even when the run is stopped (Ctrl+C) or fails, from the pictures taken so far

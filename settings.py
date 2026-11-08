@@ -318,13 +318,15 @@ VORO_AXIS_WEIGHT = 0.3       # pull towards each piece's long axis (0 = follow t
 
 # repair at the end of the job (gap method)
 REPAIR_BY_GAPS = True      # True = paint only the empty spots of the artwork (recommended)
-REPAIR_GAP_DONE_PX = 30   # stop repairing when fewer empty pixels than this are left
+REPAIR_GAP_DONE_PX = 150  # stop repairing when fewer empty pixels than this are left (~7 mm² at the ~4.7 camera px per mm of a 1920x1080 camera;
+                          # was 30: on 2026-11-08 the last 179 and 126 px were single specks, each another 2-min pass)
 REPAIR_TRAVEL_MM = 2.0     # lift between repair strokes, mm above the paint contact
 REPAIR_MIN_GAP_MM2 = 2.0     # (was 8: left all the 5-8 mm2 white spots in solid shapes, 2026-10-27) ignore empty specks smaller than this (mm²). Raise = fewer small fills, big white spots still filled
 REPAIR_RIM_MM = 3.0          # edge strips thinner than this are not counted as empty. Raise = less overpainting of edges
 REPAIR_EDGE_BAND_MM = 0.5    # ... but only within this distance of the outline: further inside, thin white strips (between veins) ARE repaired
 REPAIR_SPECK_MERGE_MM = 1.5  # pinholes closer than this merge into one patch that is repainted as a whole (0 = off)
-REPAIR_MIN_PROGRESS = 1.25   # stop when a pass keeps more than this fraction of the previous empty pixels
+REPAIR_MIN_PROGRESS = 0.8    # stop when a pass keeps more than this fraction of the previous empty pixels (was 1.25 = only when
+                             # they INCREASED, so the repairs never stopped: 2026-11-08 the passes kept 41 51 75 84 87 95 98 %)
 REPAIR_MIN_STROKE_MM = 1.2   # repair strokes shorter than this are not painted (they would only be dots)
 REPAIR_WIDTH_SHARE = 0.9     # a repair stroke is pressed for at most this share of the widest mark (less deep = paler)
 REPAIR_TAPER = True          # a repair stroke blends in (no 'stairs'): smooth width along it, and each end runs on over the paint around
@@ -335,9 +337,15 @@ REPAIR_TAPER_MAX_MM = 6.0    # ... and at most this (mm). False / REPAIR_TAPER =
 REPAIR_FADED_SHARE = 0.5     # black that is painted but less than this share as dark as the job's well-painted strokes counts as
                              #   missing too: the repair gives it a second coat. 0 = off (only empty spots are repaired)
 REPAIR_TAPER_MAX_TURN_DEG = 30.0   # a run stops where it would cut across the painted lines around it by more than this (degrees)
-REPAIR_PASSES = 1000         # at most this many repair passes (1000 = until done or no progress; REPAIR_MIN_PROGRESS stops it)
+REPAIR_PASSES = 6            # at most this many repair passes, a safety net: REPAIR_MIN_PROGRESS / REPAIR_GAP_DONE_PX normally
+                             # stop them after 3-4 (was 1000)
 REPAIR_STEP_MM = 0.2         # each repair pass presses this much deeper than the one before (2026-11-08: was 0.15) ...
 REPAIR_MAX_DEEPER_MM = 2.0   # ... but never more than this below the first pass (was 1.0); never below machine Z 0.3 either
+# the live window's bar covers the whole job, drying and repairs included. After every job, job_history.json keeps how long the
+# painting and each repair pass took and how many empty pixels each left; the next job's forecast comes from that. Until then:
+PROGRESS_REPAIR_SHARE = 0.8  # repair pass 1 takes this share of the painting's (estimated) time (2026-11-08: 0.11 - 1.49, median 0.82)
+PROGRESS_REPAIR_DECAY = 0.7  # each later pass takes this share of the pass before (2026-11-08: median 0.68)
+PROGRESS_REPAIR_PASSES = 4   # how many repair passes to expect (2026-11-08: 3 and 4 with REPAIR_MIN_PROGRESS 0.8)
 REPAIR_MAX_SHIFT_MM = 1.5    # no repair when the paint sits further than this from where the plan put it (the photo would mislead it)
 REPAIR_LINE_MAX_MM = 2.5     # thin lines of the artwork (narrower than this) are checked along their centre line ...
 REPAIR_LINE_NEAR_MM = 0.7    # ... and repainted where no paint lies within this distance of it ...
