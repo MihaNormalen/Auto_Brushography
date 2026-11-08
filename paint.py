@@ -2459,7 +2459,7 @@ def go_to_snapshot(machine, cfg, settle=1.0):
     vprint(f"moving the toolhead out of the camera's view: X {sx:.0f} Y {sy:.0f}")
     mc.park(machine, sx, sy, cfg["z_high"], feed=cfg["feed"], accel=cfg["accel_travel"], timeout=60)
     machine.flush_motion()
-    time.sleep(settle)                                         # let the picture settle (exposure, vibration)
+    _pump_sleep(settle)                                        # let the picture settle (exposure, vibration)
 
 
 def capture_fresh(cap, max_s=6.0):
@@ -2528,7 +2528,8 @@ def command_table(code):
 
 class LivePreview:
     """Camera window while the machine paints - made for screen recording: the live picture, the planned strokes
-    (faint, key O switches them off), the layer, progress, elapsed and remaining time. Q closes only this window."""
+    (faint, key O switches them off), the layer, progress, elapsed and remaining time. Q closes only this window; R (or
+    Enter) ends a drying wait (dry_wait)."""
     def __init__(self, plan, total, total_est, grabber=None, show=True, record=None, crop=None):
         self.grabber, self.show = grabber, show                    # grabber: the camera is held by check.py and shared; show False = no window at all
         self.record, self.crop = record, crop                      # record: time-lapse video file (TIMELAPSE); crop: (x0, y0, x1, y1) camera px
@@ -2597,6 +2598,9 @@ class LivePreview:
             self._close_window()
         if k in (ord("o"), ord("O")):
             self.show_plan = not self.show_plan
+        if k in (ord("r"), ord("R"), 13, 10):
+            global SKIP_WAIT
+            SKIP_WAIT = True                                        # dry_wait() reads this: R / Enter in the window ends the drying now
 
     def _close_window(self):
         if self._win_open and self._ui_thread():
@@ -2754,17 +2758,32 @@ def _gif_frame(frame, paper_poly, n, total):
     return im
 
 
+SKIP_WAIT = False                                                 # set by R / Enter in the live camera window
+
+
 def dry_wait(minutes, label):
-    """Waits for the paint to dry, with a countdown in this window every minute. Press R (or Enter) here to go on at once.
-    Ctrl+C still stops the program."""
+    """Waits for the paint to dry, with a countdown here every 5 minutes. R (or Enter) in the live camera window, or Enter in
+    this terminal (Windows: R or Enter), goes on at once. Ctrl+C still stops the program."""
+    global SKIP_WAIT
+    import sys
     end = time.time() + minutes * 60.0
-    print(f"\n   DRYING before the picture of {label}: {minutes:g} min. Press R (or Enter) here to continue now.")
+    print(f"\n   DRYING before the picture of {label}: {minutes:g} min. Press Enter here (or R in the camera window) to continue now.")
     try:
         import msvcrt                                   # Windows: reads the keyboard without waiting
     except ImportError:
         msvcrt = None
     while msvcrt is not None and msvcrt.kbhit():           # keys pressed earlier (the Enter after "Start painting now?") do not count
         msvcrt.getwch()
+    tty = None                                             # macOS / Linux: the terminal, read without waiting (select)
+    if msvcrt is None:
+        try:
+            import select, termios
+            if sys.stdin.isatty():
+                termios.tcflush(sys.stdin, termios.TCIFLUSH)   # keys typed earlier do not count either
+                tty = select
+        except Exception:
+            tty = None
+    SKIP_WAIT = False                                      # an R pressed earlier, while painting, does not count
     next_print = time.time()
     while True:
         left = end - time.time()
@@ -2779,7 +2798,33 @@ def dry_wait(minutes, label):
             if ch.lower() == "r" or ch in ("\r", "\n"):
                 print("   continued by you")
                 return
-        time.sleep(0.5)
+        if tty is not None and tty.select([sys.stdin], [], [], 0)[0]:
+            sys.stdin.readline()                           # a line typed here (Enter, or R + Enter)
+            print("   continued by you")
+            return
+        if SKIP_WAIT:
+            SKIP_WAIT = False
+            print("   continued by you")
+            return
+        _pump_sleep(0.5)
+
+
+def _pump_sleep(seconds):
+    """time.sleep that keeps the live camera window drawing. On macOS only the main thread can draw it (LivePreview.pump), so
+    while the main thread waits here (drying: minutes) it calls machine.WAIT_HOOK about 30 times a second; elsewhere the hook
+    does nothing and this is a plain sleep."""
+    end = time.time() + seconds
+    while True:
+        hook = getattr(mc, "WAIT_HOOK", None)
+        if hook is not None:
+            try:
+                hook()
+            except Exception:
+                pass
+        left = end - time.time()
+        if left <= 0:
+            return
+        time.sleep(min(0.03, left))
 
 
 # ============================ REPAIR BY GAPS (the artwork against the photo) ============================
@@ -3438,9 +3483,9 @@ class Photos:
             # same moment crashes Python in the camera driver (access violation)
             t = time.time()
             while getattr(pv, "latest", None) is None and thread.is_alive() and time.time() - t < 20.0:
-                time.sleep(0.1)
+                _pump_sleep(0.1)
             if getattr(pv, "latest", None) is not None:
-                time.sleep(settle)                           # the head has just stopped: let the live view show the settled sheet
+                _pump_sleep(settle)                          # the head has just stopped: let the live view show the settled sheet
                 return pv.latest.copy()
             if thread.is_alive():
                 raise RuntimeError("the live window has the camera but no picture yet")
