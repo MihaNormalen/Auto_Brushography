@@ -2944,6 +2944,42 @@ def taper_repair_stroke(pts, ws, inside, w_min, step=0.4, along=None):
     return pa[::-1] + list(pts) + pb, wa[::-1] + list(ws) + wb
 
 
+def keep_inside(pts, ws, dist, gx, gy, origin, res=RES):
+    """Moves each point of a repair stroke inward until the stroke's EDGE, not its centre, lies on the artwork's outline: a brush
+    wider than the missing strip (a 2 mm thinnest mark on a 0.7 mm strip along a line, 2026-11-08 ko/75) then lies over the
+    paint already there instead of sticking out past the line as a bulge with square ends - the 'stairs'. dist = mm to the
+    artwork's edge on the repair grid, (gx, gy) its gradient (pointing inward). A line narrower than the mark keeps the stroke
+    on its middle (the most the brush can do). Returns the moved points, smoothed along the stroke."""
+    from scipy.ndimage import gaussian_filter1d
+    Hg, Wg = dist.shape
+
+    def at(a, x, y):
+        i, j = int((y - origin[1]) * res), int((x - origin[0]) * res)
+        return float(a[min(max(i, 0), Hg - 1), min(max(j, 0), Wg - 1)])
+    out = []
+    for (x, y), w in zip(pts, ws):
+        need = 0.5 * float(w)
+        for _ in range(20):                                        # small steps up the distance: stops at the line's middle
+            d = at(dist, x, y)
+            if d >= need:
+                break
+            v = np.array([at(gx, x, y), at(gy, x, y)])
+            n = float(np.hypot(*v))
+            if n < 1e-3:
+                break
+            step = min(0.15, need - d)
+            x2, y2 = x + v[0] / n * step, y + v[1] / n * step
+            if at(dist, x2, y2) <= d:                              # past the middle: no deeper inside to go
+                break
+            x, y = x2, y2
+        out.append((x, y))
+    if len(out) >= 5:
+        a = np.asarray(out, float)
+        a = gaussian_filter1d(a, 2.0, axis=0, mode="nearest")      # no zig-zag from point-by-point moves
+        out = [tuple(p) for p in a]
+    return out
+
+
 def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None):
     global LAST_GAP
     """G-code for the EMPTY spots: where the artwork has colour and the photo shows none. Each colour is dipped into its own
@@ -3096,6 +3132,11 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
         py_, px_ = np.nonzero(paint_m & roi)                       # the paint on the sheet: which way its lines run (along)
         paint_mm = px_to_mm_array(H, np.c_[px_, py_]) if px_.size else np.zeros((0, 2))
         cross_cos = math.cos(math.radians(float(getattr(S, "REPAIR_TAPER_MAX_TURN_DEG", 30.0))))
+    # REPAIR_EDGE_INSIDE: a repair stroke's edge (not its centre) on the artwork's outline (keep_inside)
+    edge_inside = bool(getattr(S, "REPAIR_EDGE_INSIDE", True))
+    if edge_inside:
+        ay_, ax_ = np.nonzero(ink_f & roi)
+        art_mm = px_to_mm_array(H, np.c_[ax_, ay_]) if ax_.size else np.zeros((0, 2))
     out, counts = [f"; REPAIR BY GAPS: empty spots only, {extra_mm:.2f} mm deeper than the first pass"], {k: 0 for k in layers_r}
     for layer in layers_r:
         sel = colour == layer
@@ -3114,6 +3155,15 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
         fsel = faded[ys, xs][sel]
         grid_f[gy[fsel], gx[fsel]] = True
         grid_f = cv2.dilate(grid_f.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        dist_a = None
+        if edge_inside:                                            # mm to the artwork's edge on this grid, and which way is inward
+            art_g = np.zeros((Hg, Wg), np.uint8)
+            q = ((art_mm - origin) * RES).astype(int)
+            ok_q = (q[:, 0] >= 0) & (q[:, 0] < Wg) & (q[:, 1] >= 0) & (q[:, 1] < Hg)
+            art_g[q[ok_q, 1], q[ok_q, 0]] = 1
+            art_g = cv2.morphologyEx(art_g, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+            dist_a = cv2.GaussianBlur(cv2.distanceTransform(art_g, cv2.DIST_L2, 5) / RES, (0, 0), 1.0)
+            gya, gxa = np.gradient(dist_a)
         inside = along = None
         if taper:                                                  # the artwork's shape on the same grid: the runs stay in it
             ink_g = np.zeros((Hg, Wg), np.uint8)
@@ -3174,6 +3224,8 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
                 pts = list(zip(np.interp(t_, s_, [p[0] for p in pts]), np.interp(t_, s_, [p[1] for p in pts])))
                 if ws is not None and inside is not None:                  # blend in: smooth widths, thin runs over the paint around it
                     pts, ws = taper_repair_stroke(pts, ws, inside, float(cw[0]), along=along)
+                if ws is not None and dist_a is not None:                  # its edge on the outline, not its centre (no bulges)
+                    pts = keep_inside(pts, [min(max(w, float(cw[0])), w_rep) for w in ws], dist_a, gxa, gya, origin)
                 if ws is not None:                                         # the thin end first, like every line
                     tmp = Stroke(pts, "line"); tmp.widths = ws
                     if thin_end_flip(tmp):

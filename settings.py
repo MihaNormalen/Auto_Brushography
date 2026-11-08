@@ -191,7 +191,7 @@ PROBE_ASK = False               # True = ask before painting: "Paint the probes.
 PROBE_COUNT = 2                 # 4 = one line along each edge: touch height, width curve, brush offset AND the tilt of the paper (checked).
                                 # 2 = left + right edge only (the paper lies flattest there): the height follows a straight slope from one
                                 #     line to the other, the brush offset along the lines comes from the last probe; no cross-check
-PROBE_PAIR = ("left", "right")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
+PROBE_PAIR = ("top", "bottom")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
                                 #     sides are bent (2026-11-08, the big 411 x 277 sheet). Top / bottom as the camera picture shows them
 PROBE_LINE_MM = 140.0            # length of each line (centred on its edge; one dip has to last for it)
 PROBE_STEP_STROKES = False      # 2026-11-01: ko/15 with True looked worse to the user. (with PROBE_COUNT = 2) a row of short strokes along the TOP edge, each landed and lifted exactly like an
@@ -324,7 +324,8 @@ REPAIR_MIN_GAP_MM2 = 2.0     # (was 8: left all the 5-8 mm2 white spots in solid
 REPAIR_RIM_MM = 3.0          # edge strips thinner than this are not counted as empty. Raise = less overpainting of edges
 REPAIR_EDGE_BAND_MM = 0.5    # ... but only within this distance of the outline: further inside, thin white strips (between veins) ARE repaired
 REPAIR_SPECK_MERGE_MM = 1.5  # pinholes closer than this merge into one patch that is repainted as a whole (0 = off)
-REPAIR_MIN_PROGRESS = 1.25   # stop when a pass keeps more than this fraction of the previous empty pixels
+REPAIR_MIN_PROGRESS = 0.9    # stop when a pass keeps more than this fraction of the previous empty pixels (2026-11-08: was 1.25,
+                             #   which only stopped when a pass made it WORSE: ko/70 ran passes 9-10 for nothing, ko/74 pass 3)
 REPAIR_MIN_STROKE_MM = 1.2   # repair strokes shorter than this are not painted (they would only be dots)
 REPAIR_WIDTH_SHARE = 0.9     # a repair stroke is pressed for at most this share of the widest mark (less deep = paler)
 REPAIR_TAPER = True          # a repair stroke blends in (no 'stairs'): smooth width along it, and each end runs on over the paint around
@@ -334,6 +335,8 @@ REPAIR_TAPER_MIN_MM = 1.5    # ... but at least this ...
 REPAIR_TAPER_MAX_MM = 6.0    # ... and at most this (mm). False / REPAIR_TAPER = False = the old square-ended repair strokes
 REPAIR_FADED_SHARE = 0.5     # black that is painted but less than this share as dark as the job's well-painted strokes counts as
                              #   missing too: the repair gives it a second coat. 0 = off (only empty spots are repaired)
+REPAIR_EDGE_INSIDE = True    # a repair stroke's EDGE (not its centre) goes on the artwork's outline: a brush wider than the missing
+                             #   strip lies over the paint already there instead of sticking out as a bulge ('stairs'). False = centred
 REPAIR_TAPER_MAX_TURN_DEG = 30.0   # a run stops where it would cut across the painted lines around it by more than this (degrees)
 REPAIR_PASSES = 1000         # at most this many repair passes (1000 = until done or no progress; REPAIR_MIN_PROGRESS stops it)
 REPAIR_STEP_MM = 0.2         # each repair pass presses this much deeper than the one before (2026-11-08: was 0.15) ...

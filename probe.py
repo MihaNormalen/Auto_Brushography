@@ -574,8 +574,15 @@ def print_report(probes, results, sol, contact_guess):
         else:
             print(f"{r['name']:9s} {p['length']:6.0f}mm {p['z_start']:8.2f} {'-':>8s}   " + "; ".join(r["flags"]))
     if sol is None and sum(1 for r in results if r["ok"]) >= probes_needed():
-        print("\nthe touch was found on every line, but not how the width grows with depth: below the touch the lines were too short "
-              "(the ramp ends at machine Z 0.3) or the brush ran out of paint. Mount the brush lower, so it touches higher up.")
+        starved = [r["starved_at_mm"] - r["s_contact"] for r in results if r["ok"] and "starved_at_mm" in r]
+        if starved:                                                  # the paint ran out soon after the touch: the ramp sank too slowly
+            print(f"\nthe touch was found on every line, but not how the width grows with depth: the brush ran out of paint "
+                  f"{min(starved):.0f} mm after the touch, before it was much deeper. A steeper ramp gets deeper on one dip: a shorter "
+                  f"PROBE_LINE_MM (now {PROBE_LINE_MM:g}) or a smaller PROBE_ABOVE_MM (now {PROBE_ABOVE_MM:g}) in settings.py.")
+        else:
+            print("\nthe touch was found on every line, but not how the width grows with depth: below the touch the lines were too short "
+                  "(the ramp ends at machine Z 0.3). Mount the brush lower, so it touches higher up.")
+        return                                                       # no result to print (2026-11-08: went on and crashed)
     elif sol is None:
         print(f"\nnot enough good lines (at least {probes_needed()}) to say where the brush touches.")
         return
