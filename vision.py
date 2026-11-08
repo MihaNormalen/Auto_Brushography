@@ -567,8 +567,8 @@ def detect_paper(frame, H, H_inv, seed_px=None, calib_mm=None):
 
 def clip_to_reach(det, margin_mm=2.0):
     """A sheet bigger than the machine can reach (2026-10-28: a 296 mm sheet, X travel ends at ~289): its corners in machine mm
-    are pulled in to MACHINE_X/Y_MIN/MAX, so the probes and the artwork stay where the brush can go - by the same amount on
-    opposite sides, so everything stays centred on the sheet. The picture corners stay."""
+    are pulled in to MACHINE_X/Y_MIN/MAX, so the probes and the artwork stay where the brush can go - each side only as far as
+    needed (REACH_CENTRED = True: by the same amount on opposite sides). The picture corners stay."""
     import settings as S
     try:                                                          # the paint lands at head + tip offset: the reach of the PAINT
         import probe as PB
@@ -580,28 +580,37 @@ def clip_to_reach(det, margin_mm=2.0):
     mm = np.array(det["corners_mm"], float)                         # tl, tr, br, bl
     if ((mm >= lo - 1e-9) & (mm <= hi + 1e-9)).all():
         return det
-    # the sheet is shrunk by the SAME amount on opposite sides, along its own edges (it may lie a little rotated), until every
-    # corner is in reach: the probe lines and the artwork stay centred on the real sheet, the margins stay even
+    # the sheet is shrunk along its own edges (it may lie a little rotated) until every corner is in reach. Each side is cut
+    # only as far as the reach needs (2026-11-08: a 180 mm sheet at X -6..174 with reach 0..151 was cut 22 mm on BOTH sides,
+    # so the left probe sat at X 20 although the brush paints from X 2). REACH_CENTRED = True: the same cut on opposite
+    # sides, so probes and artwork stay centred on the real sheet (but up to twice the width is lost).
+    centred = bool(getattr(S, "REACH_CENTRED", True))
     u = (mm[1] - mm[0]) + (mm[2] - mm[3])
     v = (mm[3] - mm[0]) + (mm[2] - mm[1])
     u, v = u / np.linalg.norm(u), v / np.linalg.norm(v)
     c = mm.mean(axis=0)
     su, sv = np.sign((mm - c) @ u), np.sign((mm - c) @ v)            # which side of the middle each corner is on
-    cut = np.zeros(2)                                                # how much comes off each end, along u and along v
+    side = ((su > 0).astype(int), (sv > 0).astype(int))             # per paper axis: 0 = the minus end, 1 = the plus end
+    cut = np.zeros((2, 2))                                           # cut[axis][end]: how much comes off that end, along u / v
     for _ in range(50):
-        q = mm - np.outer(su * cut[0], u) - np.outer(sv * cut[1], v)
+        q = mm - np.outer(su * cut[0][side[0]], u) - np.outer(sv * cut[1][side[1]], v)
         over = np.maximum(q - hi, 0.0) + np.maximum(lo - q, 0.0)     # how far each corner is out of reach, in machine X / Y
         if over.max() < 0.01:
             break
         for k in range(2):                                           # machine axis k: cut along the paper axis closest to it
-            worst = over[:, k].max()
-            if worst > 0:
-                j = 0 if abs(u[k]) >= abs(v[k]) else 1
-                cut[j] += worst / max(abs((u, v)[j][k]), 0.5)
+            j = 0 if abs(u[k]) >= abs(v[k]) else 1
+            for e in range(2):
+                on_end = side[j] == e
+                worst = over[on_end, k].max() if on_end.any() else 0.0
+                if worst > 0:
+                    cut[j][e] += worst / max(abs((u, v)[j][k]), 0.5)
+        if centred:
+            cut[:] = cut.max(axis=1, keepdims=True)
     det = dict(det)
     det["corners_mm"] = q.tolist()
-    print(f"the sheet is bigger than the machine can reach (MACHINE_X/Y_MIN/MAX in settings.py): {cut[0]:.0f} mm is left free "
-          f"on both left and right, {cut[1]:.0f} mm on both top and bottom (the margins stay even)")
+    print(f"the sheet is bigger than the machine can reach (MACHINE_X/Y_MIN/MAX in settings.py): {cut[0][0]:.0f} / {cut[0][1]:.0f} mm "
+          f"left free at left / right, {cut[1][0]:.0f} / {cut[1][1]:.0f} mm at top / bottom"
+          + (" (REACH_CENTRED: the margins stay even)" if centred else ""))
     return det
 
 

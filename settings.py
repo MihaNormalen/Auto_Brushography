@@ -130,6 +130,8 @@ MACHINE_X_MIN = -1e9       # the start of X travel (-1e9 = no limit); a bigger s
 MACHINE_Y_MIN = -1e9       # the start of Y travel (-1e9 = no limit)
 MACHINE_X_MAX = 289.0      # the end of X travel (2026-10-28: a probe line sent to X 296 stopped at ~290); a bigger sheet is used only up to here
 MACHINE_Y_MAX = 453.0      # the end of Y travel (the snapshot position)
+REACH_CENTRED = True       # a sheet bigger than the reach: True = the same cut on opposite sides (probes and artwork stay centred on the
+                           # sheet); False = each side cut only as far as the reach needs (all the paper the brush can reach is used)
 SNAPSHOT_X = 0.0          # where the toolhead waits while the camera photographs the paper
 SNAPSHOT_Y = 453.0           # the far end of Y travel: out of the picture of a big sheet
 WATER_X = None             # optional rinse dish between colours (machine mm, radius)
