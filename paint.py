@@ -2913,6 +2913,37 @@ def aim_wipe(block, tx, ty, wipe_r):
     return out
 
 
+def taper_repair_stroke(pts, ws, inside, w_min, step=0.4, along=None):
+    """A repair stroke that blends into the paint around it instead of sitting on it as a block with square ends (the 'stairs',
+    2026-11-08 sketch): its widths are smoothed along it, and each end is carried on in its own direction over the paint already
+    there - only while inside(x, y), the artwork's shape - with the width falling smoothly (cosine) to w_min, the thinnest mark.
+    The depth follows the width, so the brush glides in and out in an arc. The run is REPAIR_TAPER_RATIO x the stroke's widest
+    point, within REPAIR_TAPER_MIN_MM .. REPAIR_TAPER_MAX_MM. along(x, y, d) False = the run would cut ACROSS the painted lines
+    there: it stops (in a solid black area painted as parallel lines, a straight run crossed the next lines, 2026-11-08 ko/71).
+    pts every `step` mm, ws (mm) one per point. Returns (pts, ws)."""
+    from scipy.ndimage import gaussian_filter1d
+    ws = np.asarray(ws, float)
+    if len(ws) >= 3:
+        ws = gaussian_filter1d(ws, max(1.0, 1.0 / step), mode="nearest")                  # no plateaus with corners (sigma 1 mm)
+    run = float(np.clip(float(getattr(S, "REPAIR_TAPER_RATIO", 2.5)) * float(ws.max()),
+                        float(getattr(S, "REPAIR_TAPER_MIN_MM", 1.5)), float(getattr(S, "REPAIR_TAPER_MAX_MM", 6.0))))
+
+    def carry(p_end, d, w_end):                    # the run beyond one end: points outward from it, with their widths
+        xs, n = [], int(run / step)
+        for i in range(1, n + 1):
+            q = (p_end[0] + d[0] * i * step, p_end[1] + d[1] * i * step)
+            if not inside(*q) or (along is not None and not along(q[0], q[1], d)):
+                break
+            xs.append(q)
+        if not xs:
+            return [], []
+        t = np.arange(1, len(xs) + 1) / len(xs)                                            # 0 at the gap .. 1 at the far tip
+        return xs, list(w_min + (w_end - w_min) * 0.5 * (1.0 + np.cos(np.pi * t)))
+    pa, wa = carry(pts[0], end_dir(pts), float(ws[0]))
+    pb, wb = carry(pts[-1], end_dir(pts[::-1]), float(ws[-1]))
+    return pa[::-1] + list(pts) + pb, wa[::-1] + list(ws) + wb
+
+
 def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None):
     global LAST_GAP
     """G-code for the EMPTY spots: where the artwork has colour and the photo shows none. Each colour is dipped into its own
@@ -2939,6 +2970,26 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
         map_y = (Minv[1, 0] * xx + Minv[1, 1] * yy + Minv[1, 2]).astype(np.float32)
     LAST_ART = ink_f
     empty = ink_f & roi & ~paint_m
+    faded = np.zeros_like(empty)
+    # FADED black: painted, but much paler than this job's well-painted strokes - a second coat there (2026-11-08). Darkness =
+    # how far below the bare paper the brightness is, over about 1 mm (the banding along a stroke is not a fade); the reference
+    # is the dark end (20th percentile) of the painted black. REPAIR_FADED_SHARE = 0 / None switches it off
+    fade_share = float(getattr(S, "REPAIR_FADED_SHARE", 0.5) or 0.0)
+    if fade_share > 0 and "black" in dip_blocks:
+        hsv_f = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        bare = roi & ~paint_m & (hsv_f[..., 1] < 70)
+        if bare.any():
+            paper_v = float(np.median(hsv_f[..., 2][bare]))
+            p0, p1 = px_to_mm_array(H, [(W_img / 2.0, H_img / 2.0), (W_img / 2.0 + 1, H_img / 2.0)])
+            sig = max(1.0, 0.5 / max(float(np.linalg.norm(p1 - p0)), 1e-9))           # 0.5 mm in camera pixels
+            dark = cv2.GaussianBlur(np.clip(paper_v - hsv_f[..., 2].astype(np.float32), 0, None), (0, 0), sig)
+            black_f = cv2.remap(_art_black(art_r).astype(np.float32), map_x, map_y, cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=0) > 0.5
+            ref_sel = black_f & paint_m & roi
+            if ref_sel.sum() > 200:
+                ref = float(np.percentile(dark[ref_sel], 80))                  # the darkest fifth of the painted black
+                faded = black_f & paint_m & roi & (dark < fade_share * ref)
+                empty |= faded
     cx, cy = W_img / 2.0, H_img / 2.0
     p0, p1 = px_to_mm_array(H, [(cx, cy), (cx + 1, cy)])
     px_per_mm = 1.0 / max(float(np.linalg.norm(p1 - p0)), 1e-9)
@@ -3011,9 +3062,9 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
     acc_t = int(cfg.get("accel_travel", getattr(S, "ACCEL_TRAVEL", 12000))); acc_p = int(cfg.get("accel_paint", getattr(S, "PAINT_ACCEL", 200)))
     z_high = float(cfg["z_high"])
 
-    def z_of(w):
+    def z_of(w, extra=extra_mm):
         d = float(np.interp(min(float(w), wmax), cw, cd))
-        return max(0.3, contact - d - extra_mm)
+        return max(0.3, contact - d - extra)
 
     cfg2 = dict(cfg); cfg2["outline"] = False
     cfg2["infill_style"] = "lines"                                 # small spots: plain strokes, not leaves (fewer, longer moves)
@@ -3032,20 +3083,65 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
     def tilted(z, x, y):
         return z + tilt[0] * (x - tilt[2]) + tilt[1] * (y - tilt[3]) if tilt else z
     layers_r = list(lh) if lh else list(dip_blocks)                # the colours this job painted
+    # REPAIR_TAPER: each repair stroke runs on over the paint around it, inside the artwork's shape, thinning out (taper_repair_stroke)
+    taper = bool(getattr(S, "REPAIR_TAPER", True))
+    pad = 2.0 + (float(getattr(S, "REPAIR_TAPER_MAX_MM", 6.0)) if taper else 0.0)          # room on the grid for the runs
+    if taper:
+        # one paint (a monochrome job): the runs may also go over any paint already on the sheet (paint over the same paint does no
+        # harm; a run that left the artwork's edge on a curve, or along a stroke that spread a little, stopped short - stairs again).
+        # Several colours: only inside the artwork's shape, so a run never goes over a different colour
+        mono = len(layers_r) == 1
+        iy, ix = np.nonzero(((ink_f | paint_m) if mono else ink_f) & roi)
+        ink_mm = px_to_mm_array(H, np.c_[ix, iy]) if ix.size else np.zeros((0, 2))
+        py_, px_ = np.nonzero(paint_m & roi)                       # the paint on the sheet: which way its lines run (along)
+        paint_mm = px_to_mm_array(H, np.c_[px_, py_]) if px_.size else np.zeros((0, 2))
+        cross_cos = math.cos(math.radians(float(getattr(S, "REPAIR_TAPER_MAX_TURN_DEG", 30.0))))
     out, counts = [f"; REPAIR BY GAPS: empty spots only, {extra_mm:.2f} mm deeper than the first pass"], {k: 0 for k in layers_r}
     for layer in layers_r:
         sel = colour == layer
         if not sel.any():
             continue
         m = mm[sel]
-        origin = m.min(axis=0) - 2.0
-        Wg = int(math.ceil((m[:, 0].max() - origin[0]) * RES)) + 4
-        Hg = int(math.ceil((m[:, 1].max() - origin[1]) * RES)) + 4
+        origin = m.min(axis=0) - pad
+        Wg = int(math.ceil((m[:, 0].max() + pad - origin[0]) * RES)) + 4
+        Hg = int(math.ceil((m[:, 1].max() + pad - origin[1]) * RES)) + 4
         grid = np.zeros((Hg, Wg), bool)
         gx = np.clip(((m[:, 0] - origin[0]) * RES).astype(int), 0, Wg - 1)
         gy = np.clip(((m[:, 1] - origin[1]) * RES).astype(int), 0, Hg - 1)
         grid[gy, gx] = True
         grid = cv2.morphologyEx(grid.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0
+        grid_f = np.zeros((Hg, Wg), bool)                          # which of it is FADED paint (not white): no extra depth there
+        fsel = faded[ys, xs][sel]
+        grid_f[gy[fsel], gx[fsel]] = True
+        grid_f = cv2.dilate(grid_f.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+        inside = along = None
+        if taper:                                                  # the artwork's shape on the same grid: the runs stay in it
+            ink_g = np.zeros((Hg, Wg), np.uint8)
+            q = ((ink_mm - origin) * RES).astype(int)
+            ok_q = (q[:, 0] >= 0) & (q[:, 0] < Wg) & (q[:, 1] >= 0) & (q[:, 1] < Hg)
+            ink_g[q[ok_q, 1], q[ok_q, 0]] = 1
+            ink_g = cv2.morphologyEx(ink_g, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8)) > 0     # camera pixels are coarser than the grid
+
+            def inside(x, y, ink_g=ink_g, origin=origin):
+                gx_, gy_ = int((x - origin[0]) * RES), int((y - origin[1]) * RES)
+                return 0 <= gx_ < Wg and 0 <= gy_ < Hg and bool(ink_g[gy_, gx_])
+            # which way the painted lines run around each point (structure tensor of the paint, about 1.5 mm around), and how clearly
+            pg = np.zeros((Hg, Wg), np.float32)
+            q = ((paint_mm - origin) * RES).astype(int)
+            ok_q = (q[:, 0] >= 0) & (q[:, 0] < Wg) & (q[:, 1] >= 0) & (q[:, 1] < Hg)
+            pg[q[ok_q, 1], q[ok_q, 0]] = 1.0
+            pg = cv2.GaussianBlur(pg, (0, 0), 0.5 * RES)
+            dgx, dgy = cv2.Sobel(pg, cv2.CV_32F, 1, 0), cv2.Sobel(pg, cv2.CV_32F, 0, 1)
+            jxx, jyy, jxy = (cv2.GaussianBlur(v, (0, 0), 1.5 * RES) for v in (dgx * dgx, dgy * dgy, dgx * dgy))
+            phi = 0.5 * np.arctan2(2 * jxy, jxx - jyy) + 0.5 * np.pi           # the lines' direction (across the gradient)
+            coh = np.sqrt((jxx - jyy) ** 2 + 4 * jxy ** 2) / (jxx + jyy + 1e-9)
+            clear = (coh > 0.3) & (jxx + jyy > 0.05 * float((jxx + jyy).max() or 1.0))
+
+            def along(x, y, d, phi=phi, clear=clear, origin=origin):
+                gx_, gy_ = int((x - origin[0]) * RES), int((y - origin[1]) * RES)
+                if not (0 <= gx_ < Wg and 0 <= gy_ < Hg) or not clear[gy_, gx_]:
+                    return True                                    # no clear line direction here: no limit
+                return abs(d[0] * math.cos(phi[gy_, gx_]) + d[1] * math.sin(phi[gy_, gx_])) >= cross_cos
         strokes, _ = plan_strokes(grid, cfg2, res=RES)
         # how wide the gap is around each point: a stroke is pressed only that wide, so it fills a narrow gap without painting
         # over the strokes on either side of it
@@ -3059,11 +3155,15 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
             out.append(f"; {layer} batch {b // 8 + 1}")
             t0 = strokes[b][0]
             out.extend(aim_wipe(dip, origin[0] + t0[0] / RES, origin[1] + t0[1] / RES, float(cfg["wipe_r"])))
+            after_dip = True
             for st in strokes[b:b + 8]:
                 pts = [(origin[0] + x / RES, origin[1] + y / RES) for x, y in st]
                 L = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:]))
                 if len(pts) < 2 or L < min_len:
                     continue
+                # mostly over FADED paint: a plain second coat at the planned depth; over white: this pass's extra depth
+                on_f = np.mean([grid_f[min(max(int(round(y)), 0), Hg - 1), min(max(int(round(x)), 0), Wg - 1)] for x, y in st])
+                ex = 0.0 if on_f > 0.5 else extra_mm
                 ws = getattr(st, "widths", None)
                 if ws is None or len(ws) != len(pts):
                     ws = [float(gap_w[min(max(int(round(y)), 0), Hg - 1), min(max(int(round(x)), 0), Wg - 1)]) for x, y in st]
@@ -3072,21 +3172,29 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
                 t_ = np.linspace(0.0, s_[-1], max(2, int(math.ceil(s_[-1] / 0.4)) + 1))
                 ws = list(np.interp(t_, s_, ws)) if ws is not None and len(ws) == len(pts) else None
                 pts = list(zip(np.interp(t_, s_, [p[0] for p in pts]), np.interp(t_, s_, [p[1] for p in pts])))
+                if ws is not None and inside is not None:                  # blend in: smooth widths, thin runs over the paint around it
+                    pts, ws = taper_repair_stroke(pts, ws, inside, float(cw[0]), along=along)
                 if ws is not None:                                         # the thin end first, like every line
                     tmp = Stroke(pts, "line"); tmp.widths = ws
                     if thin_end_flip(tmp):
                         pts, ws = pts[::-1], ws[::-1]
                 # every repair stroke is as wide as its gap: at least the thinnest mark the brush makes, at most REPAIR_WIDTH_SHARE of the widest
-                zs = [z_of(min(max(w, float(cw[0])), w_rep)) for w in ws] if ws is not None else [z_of(w_rep)] * len(pts)
+                zs = [z_of(min(max(w, float(cw[0])), w_rep), ex) for w in ws] if ws is not None else [z_of(w_rep, ex)] * len(pts)
                 zs = [tilted(z, x, y) for z, (x, y) in zip(zs, pts)]
                 o_in, o_out = end_dir(pts), end_dir(pts[::-1])
                 a = (pts[0][0] + o_in[0] * lead, pts[0][1] + o_in[1] * lead)
                 e = (pts[-1][0] + o_out[0] * lead, pts[-1][1] + o_out[1] * lead)
-                # travel first, then down: right after a dip the brush is still high beside the dish, and lowering it there
-                # dragged it through the dish rim (2026-11-03). Between strokes it is already at travel height: no change
+                # right after a dip: ONE diagonal move from the wipe point (already outside the rim) down to the stroke, like the
+                # painting does - not up, across, down (2026-11-08). Lowering it straight down beside the dish had dragged it
+                # through the rim (2026-11-03); on the diagonal it only gets low far from the dish. Between strokes the brush is
+                # at travel height already: across, then the small step to this stroke's travel height
                 out += ["M400", f"M204 P{acc_t} T{acc_t}"]
-                out.append(f"G0 X{a[0]:.3f} Y{a[1]:.3f} F{feed_t}")
-                out.append(f"G0 Z{tilted(z_travel, *a):.3f} F3000")
+                if after_dip:
+                    out.append(f"G0 X{a[0]:.3f} Y{a[1]:.3f} Z{tilted(z_travel, *a):.3f} F{feed_t}")
+                    after_dip = False
+                else:
+                    out.append(f"G0 X{a[0]:.3f} Y{a[1]:.3f} F{feed_t}")
+                    out.append(f"G0 Z{tilted(z_travel, *a):.3f} F3000")
                 out += ["M400", f"M204 P{acc_p} T{acc_p}"]
                 out.append(f"G1 Z{max(zs[0], tilted(air, *a)):.3f} F{feed_d}")
                 out.append(f"G1 F{feed_p}")
@@ -3094,7 +3202,8 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
                     out.append(f"G1 X{x:.3f} Y{y:.3f} Z{z:.3f}")
                 out.append(f"G1 X{e[0]:.3f} Y{e[1]:.3f} Z{tilted(air, *e):.3f}")
                 out.append(f"G0 Z{tilted(z_travel, *e):.3f} F3000")
-            out.append(f"G0 Z{z_high:.3f} F3000")
+            # no lift to z_high here: the next dip cycle lifts by itself (its first line, the painting's own lift) - after a
+            # lift here that line sent the brush DOWN again over the painting before the trip to the dish (2026-11-08)
     out.append(f"G0 Z{z_high:.3f} F3000")
     return out, int(empty.sum()), counts
 
@@ -3833,8 +3942,10 @@ def main(argv=None):
                   f"the widths are the profile's: the lines may be too high (in the air) or too deep. ***")
         if overlay:
             show_picture(overlay)
-        if cfg.get("confirmed_once"):
-            print(f"\nLook at {overlay or out}. You said yes once: painting starts in 10 seconds (Ctrl+C = stop).")
+        ask = bool(getattr(__import__("settings"), "PROBE_ASK", False))     # PROBE_ASK = False: no question at all, only the countdown
+        if cfg.get("confirmed_once") or (not ask and not a.yes):
+            print(f"\nLook at {overlay or out}. " + ("You said yes once" if ask else "PROBE_ASK = False")
+                  + ": painting starts in 10 seconds (Ctrl+C = stop).")
             try:
                 for i in range(10, 0, -1):
                     print(f"   {i} ...", end="\r", flush=True)

@@ -185,14 +185,15 @@ CAL_DOT_COLOR = "auto"          # which paint dish to use: "auto" = the black di
 CAL_DOTS_PER_DIP = 4            # dots per dip (the brush runs dry after a few)
 
 # --- ramp probes (probe.py, or paint.py --probe): measure where THIS paint touches THIS paper, on the white margin ---
-PROBES = True                   # every paint.py job starts with the probes (the contact depends on paint, paper, speed, brush). False = never; --no_probe = skip once
-PROBE_ASK = False               # True = show the probe plan and ask "Paint the probes...? [y/N]" first; False = paint them straight away
+PROBES = True                  # every paint.py job starts with the probes (the contact depends on paint, paper, speed, brush). False = never; --no_probe = skip once
+PROBE_ASK = False               # True = ask before painting: "Paint the probes...? [y/N]" (or, when this sheet's probe is reused,
+                                #   "Start painting now? [y/N]"). False = never ask: probes straight away, artwork after a 10 s countdown
 PROBE_COUNT = 2                 # 4 = one line along each edge: touch height, width curve, brush offset AND the tilt of the paper (checked).
                                 # 2 = left + right edge only (the paper lies flattest there): the height follows a straight slope from one
                                 #     line to the other, the brush offset along the lines comes from the last probe; no cross-check
-PROBE_PAIR = ("top", "bottom")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
+PROBE_PAIR = ("left", "right")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
                                 #     sides are bent (2026-11-08, the big 411 x 277 sheet). Top / bottom as the camera picture shows them
-PROBE_LINE_MM = 80.0            # length of each line (centred on its edge; one dip has to last for it)
+PROBE_LINE_MM = 140.0            # length of each line (centred on its edge; one dip has to last for it)
 PROBE_STEP_STROKES = False      # 2026-11-01: ko/15 with True looked worse to the user. (with PROBE_COUNT = 2) a row of short strokes along the TOP edge, each landed and lifted exactly like an
                                 # artwork line at its own depth: the touch height and the width curve are taken from THEM (the sloping
                                 # lines only give the tilt between left and right). False = height and curve from the sloping lines
@@ -326,8 +327,16 @@ REPAIR_SPECK_MERGE_MM = 1.5  # pinholes closer than this merge into one patch th
 REPAIR_MIN_PROGRESS = 1.25   # stop when a pass keeps more than this fraction of the previous empty pixels
 REPAIR_MIN_STROKE_MM = 1.2   # repair strokes shorter than this are not painted (they would only be dots)
 REPAIR_WIDTH_SHARE = 0.9     # a repair stroke is pressed for at most this share of the widest mark (less deep = paler)
+REPAIR_TAPER = True          # a repair stroke blends in (no 'stairs'): smooth width along it, and each end runs on over the paint around
+                             #   it (inside the artwork's shape), thinning to the thinnest mark - the brush glides in and out in an arc
+REPAIR_TAPER_RATIO = 2.5     # ... each run is this many times the stroke's widest point long ...
+REPAIR_TAPER_MIN_MM = 1.5    # ... but at least this ...
+REPAIR_TAPER_MAX_MM = 6.0    # ... and at most this (mm). False / REPAIR_TAPER = False = the old square-ended repair strokes
+REPAIR_FADED_SHARE = 0.5     # black that is painted but less than this share as dark as the job's well-painted strokes counts as
+                             #   missing too: the repair gives it a second coat. 0 = off (only empty spots are repaired)
+REPAIR_TAPER_MAX_TURN_DEG = 30.0   # a run stops where it would cut across the painted lines around it by more than this (degrees)
 REPAIR_PASSES = 1000         # at most this many repair passes (1000 = until done or no progress; REPAIR_MIN_PROGRESS stops it)
-REPAIR_STEP_MM = 0.3         # each repair pass presses this much deeper than the one before (2026-11-08: was 0.15) ...
+REPAIR_STEP_MM = 0.2         # each repair pass presses this much deeper than the one before (2026-11-08: was 0.15) ...
 REPAIR_MAX_DEEPER_MM = 2.0   # ... but never more than this below the first pass (was 1.0); never below machine Z 0.3 either
 REPAIR_MAX_SHIFT_MM = 1.5    # no repair when the paint sits further than this from where the plan put it (the photo would mislead it)
 REPAIR_LINE_MAX_MM = 2.5     # thin lines of the artwork (narrower than this) are checked along their centre line ...
