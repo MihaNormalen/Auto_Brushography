@@ -341,6 +341,11 @@ REPAIR_PASSES = 6            # at most this many repair passes, a safety net: RE
                              # stop them after 3-4 (was 1000)
 REPAIR_STEP_MM = 0.2         # each repair pass presses this much deeper than the one before (2026-11-08: was 0.15) ...
 REPAIR_MAX_DEEPER_MM = 2.0   # ... but never more than this below the first pass (was 1.0); never below machine Z 0.3 either
+# the live window's bar covers the whole job, drying and repairs included. After every job, job_history.json keeps how long the
+# painting and each repair pass took and how many empty pixels each left; the next job's forecast comes from that. Until then:
+PROGRESS_REPAIR_SHARE = 0.8  # repair pass 1 takes this share of the painting's (estimated) time (2026-11-08: 0.11 - 1.49, median 0.82)
+PROGRESS_REPAIR_DECAY = 0.7  # each later pass takes this share of the pass before (2026-11-08: median 0.68)
+PROGRESS_REPAIR_PASSES = 4   # how many repair passes to expect (2026-11-08: 3 and 4 with REPAIR_MIN_PROGRESS 0.8)
 REPAIR_MAX_SHIFT_MM = 1.5    # no repair when the paint sits further than this from where the plan put it (the photo would mislead it)
 REPAIR_LINE_MAX_MM = 2.5     # thin lines of the artwork (narrower than this) are checked along their centre line ...
 REPAIR_LINE_NEAR_MM = 0.7    # ... and repainted where no paint lies within this distance of it ...
