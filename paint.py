@@ -2782,6 +2782,21 @@ def dry_wait(minutes, label):
         time.sleep(0.5)
 
 
+def repair_stop(gaps):
+    """The stop rule of the gap repair, given the empty pixels seen so far (the finished sheet first, then after each pass):
+    the reason to stop here, or None (one more pass). 2026-11-08 readings, 1920x1080 camera: 17194 7048 3617 2712 2281 1994
+    1904 1872 and 1404 339 179 126 - from the 4th pass on each pass kept 84-98 % (specks the brush does not fill), about
+    2-3 min each, and the job had to be stopped by hand."""
+    g = gaps[-1]
+    if g < int(getattr(S, "REPAIR_GAP_DONE_PX", 150)):
+        return "done"
+    if len(gaps) >= 2 and g > float(getattr(S, "REPAIR_MIN_PROGRESS", 0.8)) * gaps[-2]:
+        return "no real progress"
+    if len(gaps) - 1 >= int(getattr(S, "REPAIR_PASSES", 6)):
+        return "REPAIR_PASSES reached"
+    return None
+
+
 # ============================ REPAIR BY GAPS (the artwork against the photo) ============================
 def _paper_box(hsv):
     pap = ((hsv[..., 1] < 70) & (hsv[..., 2] > 160)).astype(np.uint8)
@@ -3270,15 +3285,14 @@ class Photos:
         """End of job, gap method: photo of the finished sheet, the empty spots (artwork has colour, photo has none) are painted,
         each colour from its own dish. Repeats (REPAIR_PASSES) while the empty spots keep going down."""
         on = bool(getattr(S, "REPAIR_AT_END", True))
-        passes = int(getattr(S, "REPAIR_PASSES", 1000)) if on else 0          # no real limit: repairs go on until the gaps are filled or stop making progress
+        passes = int(getattr(S, "REPAIR_PASSES", 6)) if on else 0             # repair_stop() ends them: done, no real progress, or this many
         step = float(getattr(S, "REPAIR_STEP_MM", 0.15))
         deepest = float(getattr(S, "REPAIR_MAX_DEEPER_MM", 1.0))
-        done_px = int(getattr(S, "REPAIR_GAP_DONE_PX", 300))
         H = np.linalg.inv(self.H_inv)
         if not self.dip_blocks and passes:
             print("   (no dip cycle in the G-code: nothing repainted)")
             passes = 0
-        last = None
+        gaps = []
         self.prev_gap = None
         for k in range(passes + 1):
             name = "paint_final.png" if k == 0 else f"paint_repair{k}.png"
@@ -3310,12 +3324,12 @@ class Photos:
                 return
             label = "final" if k == 0 else f"after repair {k}"
             print(f"   {label}: {n_gap} empty pixels left (" + ", ".join(f"{v} {k}" for k, v in per.items()) + ")")
-            if k == passes or n_gap < done_px:
+            gaps.append(int(n_gap))
+            why = ("repairs off" if passes == 0 else "REPAIR_PASSES reached") if k == passes else repair_stop(gaps)
+            if why:
+                if k > 0:
+                    print(f"   repairs finished: {why} ({gaps[0]} -> {n_gap} empty pixels in {k} pass(es))")
                 break
-            if last is not None and n_gap > float(getattr(S, "REPAIR_MIN_PROGRESS", 0.75)) * last:
-                print("   no real progress: stopping the repairs here")
-                break
-            last = n_gap
             print(f"REPAIR pass {k + 1}: empty spots painted, {extra:.2f} mm deeper")
             text = "\n".join(lines)
             if self.cfg.get("tool_offset"):                       # the repair lands like the painting: the same measured shift
