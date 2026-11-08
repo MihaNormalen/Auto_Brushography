@@ -30,6 +30,8 @@ from skimage.morphology import skeletonize
 import brush_profile as BP
 import machine as mc
 import settings as S
+Z_MIN = float(getattr(S, "MACHINE_Z_MIN", 0.2))      # the lowest Z the brush is ever sent to (main() has its own S)
+Z_MAX = float(((getattr(S, "MACHINE_LIMITS_MM", None) or {}).get("Z") or (0, 1e9))[1])   # ... and the highest
 from vision import mm_to_px_array, px_to_mm_array, load_calibration
 
 RES = 8.0        # pixels per mm used for planning
@@ -272,11 +274,21 @@ def hue_name(hue):
     return "?"
 
 
+def reachable(p):
+    """Can the brush get to this pool? Its centre must lie inside the machine's travel (MACHINE_X/Y_MIN/MAX in settings.py):
+    a paint tube or a label beside the machine is not a dish, however well its colour matches."""
+    x, y = p["center_mm"]
+    return S.MACHINE_X_MIN <= x <= S.MACHINE_X_MAX and S.MACHINE_Y_MIN <= y <= S.MACHINE_Y_MAX
+
+
 def assign_dishes(layers, pools, cfg, max_hue_distance=22.0):
     """Which paint pool (found by the camera) belongs to which layer. Matching is by hue, because paint in a dish
     never looks exactly like the artwork colour. Black has no colour to find: it uses the configured dip position."""
     from vision import hue_distance
     default = (cfg["dip_x"], cfg["dip_y"], None, "configured dip position (DIP_X / DIP_Y)")
+    cups = getattr(S, "CUPS", None) or {}
+    black_cup = ((float(cups["black"][0]), float(cups["black"][1]), 0.5 * float(getattr(S, "CUP_WIDTH_MM", 16.2)),
+                  "the black cup (CUPS in settings.py)") if "black" in cups else None)
     # black: the darkest round pool the camera found (vision.find_pools marks those "dark"); only without one the configured position
     darks = sorted([p for p in pools if p.get("dark")], key=lambda p: -p["area_mm2"] * p.get("roundness", 1.0))
     black_dish = ((darks[0]["center_mm"][0], darks[0]["center_mm"][1], darks[0]["radius_mm"], "dark paint pool found by the camera")
@@ -305,8 +317,8 @@ def assign_dishes(layers, pools, cfg, max_hue_distance=22.0):
         if l["name"] in out:
             continue
         if l["hue"] is None:
-            out[l["name"]] = black_dish or default
-            if not black_dish:
+            out[l["name"]] = black_dish or black_cup or default
+            if not black_dish and not black_cup:
                 print(f"\n   *** WARNING: no dish of dark paint found for '{l['name']}': it dips at DIP_X / DIP_Y (X {cfg['dip_x']:.0f} Y {cfg['dip_y']:.0f}) "
                       f"from settings.py. Check in the overlay that this IS your black dish, or answer N. ***\n")
         elif len(layers) == 1:
@@ -342,13 +354,13 @@ def apply_probe(cfg, res, a):
     curve = (list(res["curve"][0]), list(res["curve"][1]))
     cfg["z_offset"] = cfg["z_paint"] = contact
     cfg["z_low"] = max(cfg["z_low"], contact + float(S.TRAVEL_MM))             # never closer to the paper than before
-    cfg["z_high"] = max(cfg["z_high"], contact + float(S.HIGH_MM))
+    cfg["z_high"] = min(max(cfg["z_high"], contact + float(S.HIGH_MM)), Z_MAX)      # never into the top stop
     cfg["curve"] = curve
     cfg["aniso"] = res.get("aniso") if getattr(S, "PROBE_USE_ANISO", False) else None   # see PROBE_USE_ANISO in settings.py
     pf = cfg.get("paper_frame") or {}
     if pf.get("u") and pf.get("v"):
         cfg["aniso_axes"] = (tuple(pf["u"][:2]), tuple(pf["v"][:2]))
-    room = contact - 0.2                                                       # how far below the contact the machine can go (Z 0.2)
+    room = contact - Z_MIN                                           # how far below the contact the machine can go (MACHINE_Z_MIN)
     cfg["line_depth"] = round(max(min(curve[0][-1], room), 0.0), 2)
     mine = getattr(a, "from_profile", set())                                   # numbers the PROFILE put there are replaced by the measured ones; yours stay
     if a.line_depth is not None and "line_depth" not in mine:                  # your own limit (LINE_DEPTH in settings.py / --line_depth) still holds
@@ -381,17 +393,29 @@ def apply_probe(cfg, res, a):
         print(f"   brush tip: the paint lands {cfg['tool_offset'][0]:+.2f} mm in X / {cfg['tool_offset'][1]:+.2f} mm in Y from where it is told; every X / Y in this job is shifted "
               f"by the opposite, so the strokes land where the overlay shows them")
     if room < curve[0][-1] - 1e-6:
-        print(f"   WARNING: the deepest line is limited by the machine's Z 0.2: only {room:.1f} mm below the contact are possible, the widest "
+        print(f"   WARNING: the deepest line is limited by MACHINE_Z_MIN ({Z_MIN:g}): only {room:.1f} mm below the contact are possible, the widest "
               f"lines the brush could make ({curve[1][-1]:.2f} mm) are out of reach. A brush mounted about {curve[0][-1] - room:.1f} mm longer would give them.")
 
 
 def shift_gcode_xy(code, dx, dy):
-    """Adds (dx, dy) to the X and Y of every G0 / G1 move (the brush tip is not where the calibration thinks it is)."""
-    def fix(m):
-        line = m.group(0)
+    """Adds (dx, dy) to the X and Y of every G0 / G1 move (the brush tip is not where the calibration thinks it is).
+    Not inside a cup pickup (from "; cup ..." to "; travel to the next stroke", Painter._cup_pickup): the CUPS are machine
+    positions from the holder, not places on the paper seen through the calibration, and the deep end sits at Y 0 - shifted,
+    it would ask for the far side of the stop. The trip to the paper after it is shifted as usual."""
+    def fix(line):
         line = re.sub(r"(?<=\bX)(-?\d+\.\d+)", lambda k: f"{float(k.group(1)) + dx:.3f}", line)
         return re.sub(r"(?<=\bY)(-?\d+\.\d+)", lambda k: f"{float(k.group(1)) + dy:.3f}", line)
-    return re.sub(r"^G[01] [^\n;]*", fix, code, flags=re.M)
+    out, in_cup = [], False
+    for line in code.split("\n"):
+        if line.startswith("; cup "):
+            in_cup = True
+        elif line.startswith("; travel to the next stroke"):
+            in_cup = False
+        if not in_cup and re.match(r"G[01] ", line):
+            body, sep, comment = line.partition(";")
+            line = fix(body) + sep + comment
+        out.append(line)
+    return "\n".join(out)
 
 
 def first_layer_color(img_path, cfg):
@@ -1665,6 +1689,20 @@ def end_dir(path, look_mm=1.0):
     return (float(v[0] / n), float(v[1] / n)) if n > 1e-9 else (1.0, 0.0)
 
 
+def dip_lanes(cup_x, width, lanes, x_limits=(0.0, float("inf"))):
+    """The X positions successive pickups from one rectangular cup use, in visiting order (from ../brushograph's copicograf):
+    evenly spread over the middle 70% of the cup's width, stepped through by the biggest stride coprime with the count
+    (5 lanes: 0 2 4 1 3), so one pickup and the next land at opposite sides. Moving the lane every pickup is what mixes the
+    paint. Held inside x_limits, taking whatever room is left on each side."""
+    lanes = max(1, int(lanes))
+    half = width / 2 * 0.7
+    left, right = max(x_limits[0], cup_x - half), min(x_limits[1], cup_x + half)
+    if lanes == 1 or right - left < 0.5:
+        return [cup_x]
+    stride = next(k for k in range(lanes // 2, 0, -1) if math.gcd(k, lanes) == 1)
+    return [left + (right - left) * ((i * stride) % lanes) / (lanes - 1) for i in range(lanes)]
+
+
 class Painter:
     """Writes the G-code. Dip logic is the one from mama.py (random interval, spiral, wipe); the interval is exact,
     and one file can hold several colour layers with a rinse in between."""
@@ -1676,6 +1714,7 @@ class Painter:
         self.current_max_dist = random.uniform(cfg["min_dist"], cfg["max_dist"])
         self.dips = 0
         self.dish = None
+        self._lane = {}                                    # the next lane per cup (CUP_SHAPE "modern")
 
     def _set_speed(self, mode="travel"):
         c = self.cfg
@@ -1695,8 +1734,12 @@ class Painter:
         return max(float(floor), c["dip_z"] - step * (self.dips - 1))
 
     def _dip_and_travel(self, tx, ty, dish=None):
-        """Dip at `dish` = (x, y, radius or None), wipe, travel to (tx, ty). Spiral and jitter shrink to fit a small pool."""
+        """Dip at `dish` = (x, y, radius or None), wipe, travel to (tx, ty). Spiral and jitter shrink to fit a small pool.
+        A dish that is one of the CUPS of a "modern" holder (settings.py) gets the cup pickup instead: _cup_pickup."""
         c = self.cfg
+        cup = self._cup_at(*(dish[:2] if dish is not None else (c["dip_x"], c["dip_y"])))
+        if cup is not None:
+            return self._cup_pickup(tx, ty, *cup)
         dx0, dy0, dr = dish if dish is not None else (c["dip_x"], c["dip_y"], None)
         jitter, spiral = c["dip_jitter"], c["dip_spiral_r"]
         if dr is not None:
@@ -1726,6 +1769,57 @@ class Painter:
         self.gcode.append(f"G0 Z{c['z_high']:.3f} F3000")
         self.gcode.append("; travel to the next stroke")                               # the repair reuses the dip cycle up to here, not this trip
         self.gcode.append(f"G0 X{tx:.3f} Y{ty:.3f} Z{c['z_low']:.3f} F{c['feed']}")     # the trip to the next stroke: TRAVEL speed again (the lift set F3000)
+        self.dist_since_dip = 0.0
+        self.current_max_dist = random.uniform(c["min_dist"], c["max_dist"])
+        self.current_pos = (tx, ty)
+
+    @staticmethod
+    def _cup_at(x, y):
+        """(name, x, y) of the CUPS cup at (x, y) when the holder is "modern" (CUP_SHAPE in settings.py), else None."""
+        cups = getattr(S, "CUPS", None) or {}
+        if str(getattr(S, "CUP_SHAPE", "") or "").lower() != "modern" or not cups:
+            return None
+        name, (cx, cy) = min(cups.items(), key=lambda kv: math.hypot(x - kv[1][0], y - kv[1][1]))
+        return (name, float(cx), float(cy)) if math.hypot(x - cx, y - cy) < 3.0 else None
+
+    def _cup_pickup(self, tx, ty, name, cx, cy):
+        """A pickup from the CMYK holder, the way ../brushograph's copicograf loads a "modern" bay: the floor climbs in stairs
+        towards the back (+Y), so the brush goes straight down at the deep end, stands on the floor, then ONE move draws it up
+        the stairs while Z rises to the exit height - it leaves the paint wiped, no rim wipe. The cup's middle need not be
+        reachable: the deep end is held at CUP_Y_FLOOR (Y 0), only the swipe gets shorter. Every pickup uses another lane
+        across the cup (dip_lanes), which mixes the paint. The brush crosses the rims only at CUP_LIFT_Z. The cup's heights
+        (CUP_DIP_Z / CUP_EXIT_Z / CUP_LIFT_Z) are machine Z, not relative to the touch: the floor does not move with the brush."""
+        c = self.cfg
+        length = float(S.CUP_LENGTH_MM)
+        width = float(S.CUP_WIDTH_WATER_MM if name == "water" else S.CUP_WIDTH_MM)
+        lanes = dip_lanes(cx, width, getattr(S, "CUP_DIP_LANES", 5), (S.MACHINE_X_MIN, S.MACHINE_X_MAX))
+        k = self._lane.get(name, 0)
+        lx = lanes[k % len(lanes)]
+        self._lane[name] = k + 1
+        entry_y = max(cy - length / 2 + 0.15 * length, float(getattr(S, "CUP_Y_FLOOR", 0.0)))
+        exit_y = max(cy + length / 2, entry_y)
+        clear_y = cy + float(getattr(S, "CUP_OUTSIDE_LENGTH_MM", 35.0)) / 2 + 4.0      # past the holder's back wall
+        self.dips += 1
+        g = self.gcode
+        lift = max(float(getattr(S, "CUP_LIFT_Z", 12.0)), c["z_low"])
+        g.append("\n; --- DIP CYCLE ---")
+        g.append(f"; cup {name}, lane X {lx:.1f}: down at Y {entry_y:.1f}, up the stairs to Y {exit_y:.1f}")
+        g.append(f"G0 Z{lift:.3f} F3000")                                                  # up before crossing the rims
+        self._set_speed("travel")
+        g.append(f"G0 X{lx:.3f} Y{entry_y:.3f}")
+        dz = float(getattr(S, "CUP_DIP_Z", 1.0))                                         # the cup's own heights, machine Z
+        g.append(f"; dip depth Z {dz:.3f} (dip {self.dips})")
+        g.append(f"G1 Z{dz:.3f} F{c['plunge_feed']}")
+        g.append(f"G4 P{int(round(1000 * float(getattr(S, 'CUP_DWELL_S', 0.15))))}")       # stand on the floor
+        g.append(f"G1 X{lx:.3f} Y{exit_y:.3f} Z{float(getattr(S, 'CUP_EXIT_Z', 8.2)):.3f} F{c['wipe_feed']}")   # the swipe up the stairs
+        g.append(f"G0 Z{lift:.3f} F3000")
+        if ty > clear_y:
+            g.append(f"G0 X{lx:.3f} Y{clear_y:.3f}")                                        # clear of the holder before coming down
+            g.append("; travel to the next stroke")
+            g.append(f"G0 X{tx:.3f} Y{ty:.3f} Z{c['z_low']:.3f} F{c['feed']}")
+        else:                                                                               # to another cup (after a rinse): stay over the rims
+            g.append("; travel to the next stroke")
+            g.append(f"G0 X{tx:.3f} Y{ty:.3f} F{c['feed']}")
         self.dist_since_dip = 0.0
         self.current_max_dist = random.uniform(c["min_dist"], c["max_dist"])
         self.current_pos = (tx, ty)
@@ -1848,7 +1942,8 @@ class Painter:
             tilt = c.get("tilt")
             if tilt:                                                           # the paper is not level (measured by the probes): every Z follows it
                 base = zs if zs else [z_down] * len(path)
-                zs = [z + tilt[0] * (px_ - tilt[2]) + tilt[1] * (py_ - tilt[3]) for z, (px_, py_) in zip(base, path)]
+                zs = [max(Z_MIN, z + tilt[0] * (px_ - tilt[2]) + tilt[1] * (py_ - tilt[3]))      # the tilt comes after the depth's own
+                      for z, (px_, py_) in zip(base, path)]                                     # clamp: never below MACHINE_Z_MIN on the low side
             if kind == "line":                                                 # visible in the G-code: what this stroke does with Z
                 if has_w:
                     self.gcode.append(f"; skeleton stroke: {len(path)} points, width {min(path.widths):.2f}-{max(path.widths):.2f} mm, "
@@ -2027,7 +2122,9 @@ def default_config():
         "line_depth": None, "z_offset": 0.0, "thin_max": None, "point_step": 0.4, "plunge_feed": S.PLUNGE_FEED,
         "min_roundness": S.POOL_MIN_ROUNDNESS, "min_pool_area": S.POOL_MIN_AREA_MM2, "palette_radius": S.PALETTE_RADIUS_MM,
         "snapshot": (S.SNAPSHOT_X, S.SNAPSHOT_Y),
-        "water": (S.WATER_X, S.WATER_Y, S.WATER_R) if S.WATER_X is not None and S.WATER_Y is not None else None,
+        "water": ((S.WATER_X, S.WATER_Y, S.WATER_R) if S.WATER_X is not None and S.WATER_Y is not None
+                  else (float(S.CUPS["water"][0]), float(S.CUPS["water"][1]), 0.5 * float(S.CUP_WIDTH_WATER_MM))
+                  if "water" in (getattr(S, "CUPS", None) or {}) else None),
     }
 
 
@@ -2256,6 +2353,8 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
             rnd = p.get("roundness", 1.0)
             if d > cfg["palette_radius"]:
                 verdict = f"-> IGNORED, {d:.0f} mm from the dip position"
+            elif not reachable(p):
+                verdict = "-> IGNORED, out of the machine's reach (MACHINE_X/Y_MIN/MAX in settings.py)"
             elif p["area_mm2"] < cfg["min_pool_area"]:
                 verdict = f"-> IGNORED, too small ({p['area_mm2']:.0f} mm2 - a speck or splash, not a dish; POOL_MIN_AREA_MM2 in settings.py)"
             elif rnd < cfg["min_roundness"]:
@@ -3064,7 +3163,7 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
 
     def z_of(w, extra=extra_mm):
         d = float(np.interp(min(float(w), wmax), cw, cd))
-        return max(0.3, contact - d - extra)
+        return max(Z_MIN, contact - d - extra)
 
     cfg2 = dict(cfg); cfg2["outline"] = False
     cfg2["infill_style"] = "lines"                                 # small spots: plain strokes, not leaves (fewer, longer moves)
@@ -3080,8 +3179,8 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
     tilt = cfg.get("tilt")                                         # the paper is not level: every repair Z follows it, like the painting
     feed_t = int(cfg.get("feed", 12000))
 
-    def tilted(z, x, y):
-        return z + tilt[0] * (x - tilt[2]) + tilt[1] * (y - tilt[3]) if tilt else z
+    def tilted(z, x, y):                                           # never below MACHINE_Z_MIN, also where the paper sits low
+        return max(Z_MIN, z + tilt[0] * (x - tilt[2]) + tilt[1] * (y - tilt[3])) if tilt else z
     layers_r = list(lh) if lh else list(dip_blocks)                # the colours this job painted
     # REPAIR_TAPER: each repair stroke runs on over the paint around it, inside the artwork's shape, thinning out (taper_repair_stroke)
     taper = bool(getattr(S, "REPAIR_TAPER", True))
@@ -3842,13 +3941,14 @@ def main(argv=None):
     if a.z_offset is not None:
         cfg["z_offset"] = a.z_offset
     if cfg["line_depth"] is None:                              # not set anywhere: ON when the Z offset gives room below, else off
-        cfg["line_depth"] = round(cfg["z_offset"] - 0.2, 2) if cfg["z_offset"] >= 0.5 else 0.0     # the whole room below the touch height (down to Z 0.2)
+        room0 = cfg["z_offset"] - Z_MIN
+        cfg["line_depth"] = round(room0, 2) if room0 >= 0.5 else 0.0     # the whole room below the touch height (down to MACHINE_Z_MIN)
         cfg["line_depth_auto"] = True
     if cfg["line_depth"] < 0:
         raise SystemExit("--line_depth cannot be negative")
-    room = cfg["z_offset"] - 0.2                          # how far below the touch height the machine can go (Z 0.2)
+    room = cfg["z_offset"] - Z_MIN            # how far below the touch height the machine can go (MACHINE_Z_MIN)
     if curve is not None and cfg["line_depth"] > room > 0:
-        vprint(f"depth limited to {room:.2f} mm (machine Z 0.2) by the room below the touch height {cfg['z_offset']:.2f}  (the profile goes to {cfg['line_depth']:.1f} mm)")
+        vprint(f"depth limited to {room:.2f} mm (MACHINE_Z_MIN {Z_MIN:g}) by the room below the touch height {cfg['z_offset']:.2f}  (the profile goes to {cfg['line_depth']:.1f} mm)")
         cfg["line_depth"] = round(room, 2)
     for key, val in (("feed_paint", a.paint_feed), ("accel_paint", a.paint_accel), ("plunge_feed", a.plunge_feed), ("wipe_feed", a.wipe_feed), ("point_step", a.point_step)):
         if val is not None:
@@ -3868,9 +3968,10 @@ def main(argv=None):
         cfg["thin_max"] = cfg["brush_w"] * 1.1
     for key in ("z_paint", "z_low", "z_high", "z_wipe_exit", "dip_z"):          # machine Z = logical Z + offset
         cfg[key] += cfg["z_offset"]
+    cfg["z_high"] = min(cfg["z_high"], Z_MAX)                                   # never into the top stop
     lowest = cfg["z_paint"] - cfg["line_depth"]
-    if lowest < -1e-9 or min(cfg["z_paint"], cfg["dip_z"]) < -1e-9:
-        raise SystemExit(f"the lowest Z would be {min(lowest, cfg['dip_z']):.2f} mm - below the machine's Z 0.\n"
+    if lowest < Z_MIN - 1e-9 or min(cfg["z_paint"], cfg["dip_z"]) < Z_MIN - 1e-9:
+        raise SystemExit(f"the lowest Z would be {min(lowest, cfg['dip_z']):.2f} mm - below MACHINE_Z_MIN ({Z_MIN:g}).\n"
                          f"  The brush needs more room below: mount it lower and use --z_offset {max(cfg['line_depth'], 0) + cfg['z_offset']:.1f} "
                          f"(or Z_OFFSET in settings.py), or use a smaller --line_depth.")
     if cfg["z_paint"] >= cfg["z_low"]:

@@ -5,13 +5,14 @@ vision.py - everything about the camera:  1. open/capture   2. calibration (pixe
 import json
 import math
 import sys
+import threading
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from settings import (CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_EXPOSURE, CAMERA_BACKEND, CAMERA_FOURCC, CAMERA_SET_EXPOSURE,
+from settings import (CAMERA_URL, CAMERA_INDEX, CAMERA_WIDTH, CAMERA_HEIGHT, CAMERA_EXPOSURE, CAMERA_BACKEND, CAMERA_FOURCC, CAMERA_SET_EXPOSURE,
                       CALIBRATION_FILE, CAMERA_X_AXIS, CAMERA_Y_AXIS, PAPER_FILE)
 
 # A native crash (the program ends without a message) is written to crash_log.txt in the folder you run from.
@@ -39,14 +40,121 @@ def _backend_list(requested: str) -> list:
     return [cv2.CAP_V4L2, cv2.CAP_ANY]
 
 
+class StreamCamera:
+    """A network camera (an MJPEG stream over HTTP, RTSP, ...) that behaves like cv2.VideoCapture for this program
+    (read / get / set / isOpened / release).
+    A thread reads the stream all the time and keeps only the newest picture: OpenCV queues network pictures, so a program
+    that reads only now and then would otherwise get pictures from seconds ago. read() waits for a picture that arrived after
+    the previous read(), like a real camera, so "read a few to flush, then take one" still gives a fresh picture.
+    A dropped connection is opened again."""
+
+    def __init__(self, url, timeout=5.0, verbose=True):
+        self.url, self.timeout, self.verbose = url, timeout, verbose
+        self._cond = threading.Condition()
+        self._frame, self._seq, self._read_seq = None, 0, 0
+        self._run = True
+        self._cap = self._connect()
+        if self._cap is None:
+            raise RuntimeError(f"cannot open the camera stream {url}")
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        with self._cond:
+            if not self._cond.wait_for(lambda: self._frame is not None, timeout=timeout):
+                self.release()
+                raise RuntimeError(f"the camera stream {url} opened but sent no picture in {timeout:.0f} s")
+
+    def _connect(self):
+        for be in (cv2.CAP_FFMPEG, cv2.CAP_ANY):
+            cap = cv2.VideoCapture(self.url, be)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                return cap
+            cap.release()
+        return None
+
+    def _loop(self):
+        fails = 0
+        while self._run:
+            ok, f = self._cap.read() if self._cap is not None else (False, None)
+            if ok and f is not None:
+                fails = 0
+                with self._cond:
+                    self._frame, self._seq = f, self._seq + 1
+                    self._cond.notify_all()
+                continue
+            fails += 1
+            if fails < 20:
+                time.sleep(0.05)
+                continue
+            if self.verbose:
+                print(f"camera stream {self.url}: no pictures, connecting again")
+            if self._cap is not None:
+                self._cap.release()
+            time.sleep(1.0)
+            self._cap = self._connect() if self._run else None
+            fails = 0
+
+    def read(self):
+        """The next picture (one that arrived after the previous read), or (False, None) after `timeout` seconds without one."""
+        with self._cond:
+            if not self._cond.wait_for(lambda: not self._run or self._seq > self._read_seq, timeout=self.timeout) or not self._run:
+                return False, None
+            self._read_seq = self._seq
+            return True, self._frame.copy()
+
+    def get(self, prop):
+        f = self._frame
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return float(f.shape[1]) if f is not None else 0.0
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return float(f.shape[0]) if f is not None else 0.0
+        cap = self._cap
+        return cap.get(prop) if cap is not None else 0.0
+
+    def set(self, prop, value):
+        return False                                   # size, exposure, focus are set on the camera's own server, not from here
+
+    def isOpened(self):
+        return self._run
+
+    def release(self):
+        self._run = False
+        with self._cond:
+            self._cond.notify_all()
+        t = getattr(self, "_thread", None)
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=3)
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+
+
+def _open_stream(url, verbose=True) -> StreamCamera:
+    cap = StreamCamera(url, verbose=verbose)
+    w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if verbose:
+        print(f"Camera stream {url} opened: {w}x{h}")
+    try:
+        cal_size = np.load(CALIBRATION_FILE)["image_size"] if Path(CALIBRATION_FILE).exists() else None
+    except Exception:
+        cal_size = None
+    if cal_size is not None and tuple(int(v) for v in cal_size) != (w, h):
+        print(f"  WARNING: the calibration ({CALIBRATION_FILE}) was made at {int(cal_size[0])}x{int(cal_size[1])}, the stream is {w}x{h}. "
+              "Calibrate again (calibrate_grid.py, then calibrate_dots.py).")
+    return cap
+
+
 def open_camera(index=CAMERA_INDEX, width=CAMERA_WIDTH, height=CAMERA_HEIGHT,
-                backend=CAMERA_BACKEND, verbose=True, tries=4) -> cv2.VideoCapture:
+                backend=CAMERA_BACKEND, verbose=True, tries=4, url=CAMERA_URL):
     """Open the camera, with retries. The camera is often still held for a moment after another part of the program let go of it,
     and OpenCV sometimes raises 'Unknown C++ exception' instead of returning a failure. Both are retried, with a longer pause each time.
-    If all tries fail, the reason is raised as RuntimeError."""
+    If all tries fail, the reason is raised as RuntimeError.
+    With a `url` (CAMERA_URL in settings.py) the network stream is used instead of the USB camera `index`."""
     last = None
     for k in range(1, tries + 1):
         try:
+            if url:
+                return _open_stream(url, verbose)
             return _open_camera_once(index, width, height, backend, verbose)
         except Exception as e:                       # includes OpenCV's own exceptions
             last = e
@@ -459,8 +567,8 @@ def detect_paper(frame, H, H_inv, seed_px=None, calib_mm=None):
 
 def clip_to_reach(det, margin_mm=2.0):
     """A sheet bigger than the machine can reach (2026-10-28: a 296 mm sheet, X travel ends at ~289): its corners in machine mm
-    are pulled in to MACHINE_X/Y_MIN/MAX, so the probes and the artwork stay where the brush can go - by the same amount on
-    opposite sides, so everything stays centred on the sheet. The picture corners stay."""
+    are pulled in to MACHINE_X/Y_MIN/MAX, so the probes and the artwork stay where the brush can go - each side only as far as
+    needed (REACH_CENTRED = True: by the same amount on opposite sides). The picture corners stay."""
     import settings as S
     try:                                                          # the paint lands at head + tip offset: the reach of the PAINT
         import probe as PB
@@ -472,28 +580,37 @@ def clip_to_reach(det, margin_mm=2.0):
     mm = np.array(det["corners_mm"], float)                         # tl, tr, br, bl
     if ((mm >= lo - 1e-9) & (mm <= hi + 1e-9)).all():
         return det
-    # the sheet is shrunk by the SAME amount on opposite sides, along its own edges (it may lie a little rotated), until every
-    # corner is in reach: the probe lines and the artwork stay centred on the real sheet, the margins stay even
+    # the sheet is shrunk along its own edges (it may lie a little rotated) until every corner is in reach. Each side is cut
+    # only as far as the reach needs (2026-11-08: a 180 mm sheet at X -6..174 with reach 0..151 was cut 22 mm on BOTH sides,
+    # so the left probe sat at X 20 although the brush paints from X 2). REACH_CENTRED = True: the same cut on opposite
+    # sides, so probes and artwork stay centred on the real sheet (but up to twice the width is lost).
+    centred = bool(getattr(S, "REACH_CENTRED", True))
     u = (mm[1] - mm[0]) + (mm[2] - mm[3])
     v = (mm[3] - mm[0]) + (mm[2] - mm[1])
     u, v = u / np.linalg.norm(u), v / np.linalg.norm(v)
     c = mm.mean(axis=0)
     su, sv = np.sign((mm - c) @ u), np.sign((mm - c) @ v)            # which side of the middle each corner is on
-    cut = np.zeros(2)                                                # how much comes off each end, along u and along v
+    side = ((su > 0).astype(int), (sv > 0).astype(int))             # per paper axis: 0 = the minus end, 1 = the plus end
+    cut = np.zeros((2, 2))                                           # cut[axis][end]: how much comes off that end, along u / v
     for _ in range(50):
-        q = mm - np.outer(su * cut[0], u) - np.outer(sv * cut[1], v)
+        q = mm - np.outer(su * cut[0][side[0]], u) - np.outer(sv * cut[1][side[1]], v)
         over = np.maximum(q - hi, 0.0) + np.maximum(lo - q, 0.0)     # how far each corner is out of reach, in machine X / Y
         if over.max() < 0.01:
             break
         for k in range(2):                                           # machine axis k: cut along the paper axis closest to it
-            worst = over[:, k].max()
-            if worst > 0:
-                j = 0 if abs(u[k]) >= abs(v[k]) else 1
-                cut[j] += worst / max(abs((u, v)[j][k]), 0.5)
+            j = 0 if abs(u[k]) >= abs(v[k]) else 1
+            for e in range(2):
+                on_end = side[j] == e
+                worst = over[on_end, k].max() if on_end.any() else 0.0
+                if worst > 0:
+                    cut[j][e] += worst / max(abs((u, v)[j][k]), 0.5)
+        if centred:
+            cut[:] = cut.max(axis=1, keepdims=True)
     det = dict(det)
     det["corners_mm"] = q.tolist()
-    print(f"the sheet is bigger than the machine can reach (MACHINE_X/Y_MIN/MAX in settings.py): {cut[0]:.0f} mm is left free "
-          f"on both left and right, {cut[1]:.0f} mm on both top and bottom (the margins stay even)")
+    print(f"the sheet is bigger than the machine can reach (MACHINE_X/Y_MIN/MAX in settings.py): {cut[0][0]:.0f} / {cut[0][1]:.0f} mm "
+          f"left free at left / right, {cut[1][0]:.0f} / {cut[1][1]:.0f} mm at top / bottom"
+          + (" (REACH_CENTRED: the margins stay even)" if centred else ""))
     return det
 
 
@@ -637,11 +754,21 @@ def _roundness(filled):
     return float(filled.sum() / (math.pi * r * r))
 
 
-def find_pools(frame, H, exclude_poly_px=None, exclude_mm=15.0, min_area_mm2=100.0, open_mm=3.4):
-    """Pools of coloured paint anywhere in the picture OUTSIDE the paper (the polygon, widened by exclude_mm).
-    Saturated colour only: wood (orange, medium saturation) and small specks / splatter are ignored.
-    White, black and clear paints have no saturation and cannot be found this way.
-    Returns [{'center_px','center_mm','radius_mm','area_mm2','bgr','hue','sat'}] biggest first."""
+def _inner_radius_px(filled):
+    """The radius of the biggest circle that fits inside the pool: how far the brush may move from the centre while dipping.
+    For a round dish about its radius, for a square container half its side (the radius of a circle of the same area would
+    be 0.56 of the side and reach the wall)."""
+    return float(cv2.distanceTransform(filled.astype(np.uint8), cv2.DIST_L2, 5).max())
+
+
+def find_pools(frame, H, exclude_poly_px=None, exclude_mm=None, min_area_mm2=100.0, open_mm=3.4):
+    """Pools of paint (round dishes or square containers) anywhere in the picture OUTSIDE the paper (the polygon, widened by
+    exclude_mm, default POOL_PAPER_GAP_MM). Saturated colour, plus very dark pools (marked "dark", for black).
+    Wood (orange, medium saturation) and small specks / splatter are ignored. White and clear paints cannot be found this way.
+    Returns [{'center_px','center_mm','radius_mm','area_mm2','bgr','hue','sat'}] biggest first; radius_mm = the biggest circle inside."""
+    import settings as _S0
+    if exclude_mm is None:
+        exclude_mm = float(getattr(_S0, "POOL_PAPER_GAP_MM", 15.0))
     h, w = frame.shape[:2]
     mmpp = _mm_per_px(H, w / 2.0, h / 2.0)
     ppm = 1.0 / mmpp
@@ -717,14 +844,15 @@ def find_pools(frame, H, exclude_poly_px=None, exclude_mm=15.0, min_area_mm2=100
                 ys, xs = np.nonzero(filled)
                 cx, cy = float(xs.mean()), float(ys.mean())
                 mx, my = pixel_to_mm(H, cx, cy)
-                out.append({"center_px": (cx, cy), "center_mm": (mx, my), "radius_mm": math.sqrt(area_mm2 / math.pi),
+                out.append({"center_px": (cx, cy), "center_mm": (mx, my), "radius_mm": _inner_radius_px(filled) * mmpp,
                             "area_mm2": area_mm2, "bgr": [int(v) for v in np.median(frame[m], axis=0)],
                             "hue": circular_mean_hue(hh[m]), "sat": float(np.median(ss[m])),
                             "roundness": _roundness(filled)})
     # black (or very dark) paint: no colour to find, but much darker than anything else round on the table. Its glare (bright
     # reflections) is bridged; the pool is marked "dark" so only a black layer can use it
     import settings as _S2
-    dark = ((vv < int(getattr(_S2, "POOL_DARK_V", 70))) & (ss < 200)).astype(np.uint8) * 255
+    # (a nearly black pixel's saturation is noise - (5, 2, 3) is 150+ - so below V 30 it is not asked)
+    dark = ((vv < int(getattr(_S2, "POOL_DARK_V", 70))) & ((ss < 200) | (vv < 30))).astype(np.uint8) * 255
     if exclude_poly_px is not None:
         dark[exd] = 0
     # no bridging here (it would join the dish to dark rails and shadows next to it): a wide opening cuts thin dark connections
@@ -741,8 +869,38 @@ def find_pools(frame, H, exclude_poly_px=None, exclude_mm=15.0, min_area_mm2=100
         ys, xs = np.nonzero(filled)
         cx, cy = float(xs.mean()), float(ys.mean())
         mx, my = pixel_to_mm(H, cx, cy)
-        out.append({"center_px": (cx, cy), "center_mm": (mx, my), "radius_mm": math.sqrt(area_mm2 / math.pi),
+        out.append({"center_px": (cx, cy), "center_mm": (mx, my), "radius_mm": _inner_radius_px(filled) * mmpp,
                     "area_mm2": area_mm2, "bgr": [int(v) for v in np.median(frame[m], axis=0)],
                     "hue": circular_mean_hue(hh[m]), "sat": float(np.median(ss[m])), "dark": True,
                     "roundness": _roundness(filled)})
-    return sorted(out, key=lambda d: -d["area_mm2"])
+    return _snap_to_cups(sorted(out, key=lambda d: -d["area_mm2"]))
+
+
+def _snap_to_cups(pools):
+    """With a fixed holder (CUPS in settings.py) the camera only tells WHICH paint is in which cup; where the cups are is known
+    better from the holder than from a picture (the containers sit at the edge of the view, where a rough calibration is off by
+    10 mm and more). Each pool within half a cup spacing (X) and a cup length (Y) of a colour cup is moved onto that cup, with
+    the cup's free half-width as its radius; the biggest pool per cup is kept. Pools elsewhere - paint tubes, the holder's own
+    pink plastic, the water cup - are dropped. Without CUPS the pools are returned unchanged."""
+    import settings as _S
+    cups = dict(getattr(_S, "CUPS", None) or {})
+    if not cups:
+        return pools
+    xs = sorted(c[0] for c in cups.values())
+    half = 0.5 * min(np.diff(xs)) if len(xs) > 1 else 16.0
+    length = float(getattr(_S, "CUP_LENGTH_MM", 23.5))
+    best = {}
+    for p in pools:
+        x, y = p["center_mm"]
+        name, (cx, cy) = min(cups.items(), key=lambda kv: math.hypot(x - kv[1][0], y - kv[1][1]))
+        if name == "water" or abs(x - cx) > half or abs(y - cy) > length:
+            continue
+        if bool(p.get("dark")) != (name == "black"):            # the black cup holds the dark pool, a colour cup never does
+            continue                                            # (2026-11-07: the holder's pink rim beat the black paint by area)
+        score = p["area_mm2"] * min(float(p.get("roundness", 1.0)), 1.0)    # a filled cup beats a ragged scrap of pink holder
+        if name not in best or score > best[name]["_score"]:
+            p = dict(p, _score=score)
+            q = dict(p, camera_mm=p["center_mm"], center_mm=(float(cx), float(cy)), cup=name,
+                     radius_mm=0.5 * float(getattr(_S, "CUP_WIDTH_MM", 16.2)))
+            best[name] = q
+    return sorted(best.values(), key=lambda d: -d["area_mm2"])

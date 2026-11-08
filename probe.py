@@ -58,7 +58,7 @@ PROBE_FILE = os.path.join(HERE, getattr(S, "PROBE_FILE", "probe_result.json"))  
 SHEET_FILE = os.path.join(HERE, "probe_sheet.json")             # where the last sheet was and how many probes it has had
 PROBE_OFFSET_MAX_MM = float(getattr(S, "PROBE_OFFSET_MAX_MM", 6.0))          # a measured tip offset larger than this is not used
 PROBE_OFFSET_SCATTER_MM = float(getattr(S, "PROBE_OFFSET_SCATTER_MM", 0.5))  # ... nor one where the lines disagree with the fit by more
-Z_MIN = 0.3                                                      # the machine is never sent below this Z
+Z_MIN = float(getattr(S, "MACHINE_Z_MIN", 0.3))                 # the machine is never sent below this Z (MACHINE_Z_MIN)
 
 
 # ------------------------------------------------------------------------------------------------ planning
@@ -575,7 +575,7 @@ def print_report(probes, results, sol, contact_guess):
             print(f"{r['name']:9s} {p['length']:6.0f}mm {p['z_start']:8.2f} {'-':>8s}   " + "; ".join(r["flags"]))
     if sol is None and sum(1 for r in results if r["ok"]) >= probes_needed():
         print("\nthe touch was found on every line, but not how the width grows with depth: below the touch the lines were too short "
-              "(the ramp ends at machine Z 0.3) or the brush ran out of paint. Mount the brush lower, so it touches higher up.")
+              "(the ramp ends at MACHINE_Z_MIN) or the brush ran out of paint. Mount the brush lower, so it touches higher up.")
     elif sol is None:
         print(f"\nnot enough good lines (at least {probes_needed()}) to say where the brush touches.")
         return
@@ -747,7 +747,7 @@ def tool_offset_from_lines(D, H_inv, probes):
     A = np.array([n for _, n in vals])
     if len(vals) < 3:
         # PROBE_COUNT = 2: one vertical and one horizontal line give the shift exactly, but nothing checks it (scatter 0)
-        if len(vals) == 2 == len(probes) and abs(float(np.cross(A[0], A[1]))) > 0.7:
+        if len(vals) == 2 == len(probes) and abs(float(A[0][0] * A[1][1] - A[0][1] * A[1][0])) > 0.7:   # 2D cross product (np.cross refuses 2D vectors since NumPy 2)
             sol = np.linalg.solve(A, t)
             return [round(float(sol[0]), 3), round(float(sol[1]), 3)], 0.0
         # left + right (parallel, opposite normals): t_i = s * (n_i . u) + c gives the shift s across the lines (c = the common
@@ -844,6 +844,10 @@ def _set_status(text):
 def pick_dish(pools, color, cfg):
     near = lambda p: np.hypot(p["center_mm"][0] - cfg["dip_x"], p["center_mm"][1] - cfg["dip_y"]) <= cfg["palette_radius"]
     ok = [p for p in pools if p["roundness"] >= cfg["min_roundness"] and p["area_mm2"] >= cfg["min_pool_area"] and near(p)]
+    cups = getattr(S, "CUPS", None) or {}
+    if color in ("black", "auto") and "black" in cups:           # a fixed holder: black is where its cup is (nothing to find by colour)
+        bx, by = cups["black"]
+        return float(bx), float(by), 0.5 * float(getattr(S, "CUP_WIDTH_MM", 16.2))
     if color == "black":                                         # black: the dark pool (vision.find_pools marks it)
         cands = sorted([p for p in ok if p.get("dark")], key=lambda p: -p["area_mm2"])
     else:

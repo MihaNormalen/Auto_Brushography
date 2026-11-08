@@ -16,6 +16,9 @@ BASE_DIR = Path(__file__).resolve().parent            # files are always found n
 
 # =============================== 1. HEIGHTS ==========================================================
 TOUCH_Z = 4.2                # 2026-11-01: brush re-mounted, touches at Z 4 (by hand; the probe said 4.09). Was ~6.1 (2026-10-28)
+MACHINE_Z_MIN = 0.2          # the lowest Z the brush is ever sent to (paint, probes, repairs, calibration dots). 0.2 = just above
+                             #   the bottom of this machine's travel. A machine whose Z 0 is the paper paints by pressing INTO it:
+                             #   below 0 there (e.g. -4)
 #   machine Z where the brush tip touches the paper (rough). TRAINING: the ladder starts 0.5 mm above it and goes
 #   down to machine Z 0.2. PAINTING: used only when there is NO brush profile; with a profile the measured contact is used.
 
@@ -117,6 +120,7 @@ PAINT_WIPE_R = 31.0        # the wipe point is this far from the dish centre, to
 PALETTE_RADIUS_MM = 200.0  # a paint dish must be within this distance of DIP_X / DIP_Y
 POOL_MIN_AREA_MM2 = 300.0  # smaller pools are specks, not dishes
 POOL_MIN_ROUNDNESS = 0.3
+POOL_PAPER_GAP_MM = 15.0   # paint closer than this to the paper is not taken for a dish (6 when the containers sit right at the paper)
 POOL_MIN_SAT_PASTEL = 35   # how colourful a light (pastel) paint in a dish must be to be found. Lower = paler paints found, more false dishes
 # colours of the ARTWORK: which pixels are a colour (own layer, own dish) and which are black
 DARK_CHROMA = 70.0         # a dark pixel with less colour than this (saturation x value / 255) is black, not a colour
@@ -126,11 +130,31 @@ MACHINE_X_MIN = -1e9       # the start of X travel (-1e9 = no limit); a bigger s
 MACHINE_Y_MIN = -1e9       # the start of Y travel (-1e9 = no limit)
 MACHINE_X_MAX = 289.0      # the end of X travel (2026-10-28: a probe line sent to X 296 stopped at ~290); a bigger sheet is used only up to here
 MACHINE_Y_MAX = 453.0      # the end of Y travel (the snapshot position)
+REACH_CENTRED = True       # a sheet bigger than the reach: True = the same cut on opposite sides (probes and artwork stay centred on the
+                           # sheet); False = each side cut only as far as the reach needs (all the paper the brush can reach is used)
 SNAPSHOT_X = 0.0          # where the toolhead waits while the camera photographs the paper
 SNAPSHOT_Y = 453.0           # the far end of Y travel: out of the picture of a big sheet
 WATER_X = None             # optional rinse dish between colours (machine mm, radius)
 WATER_Y = None
 WATER_R = 15.0
+
+
+# =============================== 5b. A FIXED HOLDER OF CUPS (instead of dishes found by the camera) ===================
+# For a printed holder whose cups have stairs in the floor (openBrushograph's "modern" CMYK holder, as ../brushograph's
+# copicograf loads it): a pickup goes down at the deep end and swipes up the stairs (paint.py _cup_pickup). The camera then
+# only says which paint is in which cup; the positions are CUPS. The default here: none (dishes found by the camera).
+CUP_SHAPE = None           # "modern" = the holder above; None = round dishes found by the camera (spiral dip + rim wipe)
+CUPS = {}                  # machine mm of each cup's centre, e.g. {"water": (16, 2), "cyan": (53, 2), ..., "black": (149, 2)}
+CUP_LENGTH_MM = 23.5       # the swipe's length inside a cup (along Y)
+CUP_WIDTH_MM = 16.2        # a colour cup's inside width (along X)
+CUP_WIDTH_WATER_MM = 27.6
+CUP_OUTSIDE_LENGTH_MM = 35.0   # outside the walls: the brush stays at CUP_LIFT_Z until it is past this
+CUP_DIP_LANES = 5          # pickups spread over this many places across a cup (mixes the paint)
+CUP_Y_FLOOR = 0.0          # a deep end past this Y (the stop) is clamped to it: the brush goes down here and the swipe is shorter
+CUP_DWELL_S = 0.15         # stand on the floor this long before the swipe
+CUP_DIP_Z = 1.0            # machine Z (NOT relative to the touch: the cup floor does not move with the brush): down to here ...
+CUP_EXIT_Z = 8.2           # ... and up the stairs to here
+CUP_LIFT_Z = 12.0          # over the rims
 
 
 # =============================== 6. THE WATER DISH (training) AND THE FALLBACK DISH ==================
@@ -143,11 +167,26 @@ DIP_SPIRAL_R = 8.0
 
 
 # =============================== 7. MACHINE, CAMERA, CANVAS (rarely changed) =========================
-SERIAL_PORT = "COM9"
+MACHINE = "marlin"         # marlin = a Marlin-style board on SERIAL_PORT | fluidnc = a FluidNC controller over WiFi (FLUIDNC_HOST)
+FLUIDNC_HOST = "fluidnc.local" # FluidNC's address (name or IP); the program talks to its telnet port
+FLUIDNC_PORT = 23
+FLUIDNC_ZERO_MACRO = None  # homing on FluidNC = this file on its SD card (e.g. ../brushograph's "zero.g": into the end stops, then
+                           #   sets the coordinates from them). None = no homing macro (see FLUIDNC_HOMING)
+FLUIDNC_HOMING = False     # True: real homing ($HZ, then $HXY) - only with homing configured in FluidNC's config. False and no
+                           #   macro: the position FluidNC keeps is used as it is (no limit switches)
+FLUIDNC_MAX_FEED = None    # mm/min: no move runs faster on FluidNC (small steppers lose steps at its max rate). None = no cap.
+                           #   FluidNC runs G0 at its max rate; the programs' G0 F... is honoured as a feed instead
+BACKLASH_MM = {}           # FluidNC only: the play in each axis, e.g. {"X": 1.6, "Y": 1.8}, compensated while sending. {} = off
+MACHINE_LIMITS_MM = None   # FluidNC only: {"X": (lo, hi), "Y": (lo, hi), "Z": (lo, hi)} - a move outside is refused (not sent).
+                           #   Without limit switches nothing else stops the head running into the ends. None = no check
+
+SERIAL_PORT = "COM9"       # only for MACHINE = "marlin"
 SERIAL_BAUD = 115200
 SERIAL_TIMEOUT = 5
 
-CAMERA_INDEX = 0
+CAMERA_URL = None          # a network camera (MJPEG over HTTP, or RTSP), e.g. "http://camera.local:8080/stream"; its size is
+                           #   set on the camera itself. None = the USB camera CAMERA_INDEX
+CAMERA_INDEX = 0           # the USB camera (only used when CAMERA_URL = None)
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 CAMERA_EXPOSURE = -5
@@ -156,6 +195,7 @@ CAMERA_FOURCC = "MJPG"
 CAMERA_SET_EXPOSURE = False   # True = apply CAMERA_EXPOSURE manually
 
 # canvas corners (mm) = the four calibration dots: bottom-left, bottom-right, top-right, top-left
+# (calibrate.py --guided hovers the brush over them; they only have to be far apart and visible to the camera)
 CANVAS_CORNERS_MM = [
     (80.0, 200.0),
     (200.0, 200.0),
@@ -211,7 +251,7 @@ PROBE_RETRY_MM = 1.0            # ... each retry starts this much higher
 PROBE_APPLY_OFFSET = True       # True = shift the job by where the probes saw the paint land (brush tip offset). False = paint where told
 PROBE_FILE = "probe_result.json"   # where the probe result is saved and read from (next to the scripts)
 PROBE_ABOVE_MM = 4.0           # (2026-11-08: 4 for the big 411 x 277 sheet, it touched above 4.55; was 2.0) a ramp starts this far ABOVE the contact you expect (in the air); the real contact varies over the paper ...
-PROBE_BELOW_MM = 4.0            # ... and ends this far below it (never below machine Z 0.3). The deepest point measured = the widest
+PROBE_BELOW_MM = 4.0            # ... and ends this far below it (never below MACHINE_Z_MIN). The deepest point measured = the widest
                                 # mark a job uses: 3.0 stopped at 2.75 mm deep / 2.88 mm wide while the line was still widening (2026-10-25)
 PAINT_COLOR = "auto"           # "black" = the whole artwork is painted in black, whatever colours the picture has (by design);
                                 # "auto" = every colour of the picture becomes a layer with its own dish. --color overrides it
@@ -337,7 +377,7 @@ REPAIR_FADED_SHARE = 0.5     # black that is painted but less than this share as
 REPAIR_TAPER_MAX_TURN_DEG = 30.0   # a run stops where it would cut across the painted lines around it by more than this (degrees)
 REPAIR_PASSES = 1000         # at most this many repair passes (1000 = until done or no progress; REPAIR_MIN_PROGRESS stops it)
 REPAIR_STEP_MM = 0.2         # each repair pass presses this much deeper than the one before (2026-11-08: was 0.15) ...
-REPAIR_MAX_DEEPER_MM = 2.0   # ... but never more than this below the first pass (was 1.0); never below machine Z 0.3 either
+REPAIR_MAX_DEEPER_MM = 2.0   # ... but never more than this below the first pass (was 1.0); never below MACHINE_Z_MIN either
 REPAIR_MAX_SHIFT_MM = 1.5    # no repair when the paint sits further than this from where the plan put it (the photo would mislead it)
 REPAIR_LINE_MAX_MM = 2.5     # thin lines of the artwork (narrower than this) are checked along their centre line ...
 REPAIR_LINE_NEAR_MM = 0.7    # ... and repainted where no paint lies within this distance of it ...
@@ -347,3 +387,12 @@ JUDGE_BY_DIFFERENCE = True   # the final photo is judged against the start photo
 
 # terminal
 VERBOSE = False            # False = key lines only; True = everything
+
+
+# =============================== PERSONAL OVERRIDES ==================================================
+# settings_local.py (next to this file, NOT in git: .gitignore) may set any of the values above for this computer only,
+# e.g. another machine, camera or H4XX0R = True. It is read last, so what it sets wins. Without the file nothing changes.
+try:
+    from settings_local import *          # noqa: F401,F403
+except ImportError:
+    pass

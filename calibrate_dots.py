@@ -34,6 +34,9 @@ CAL_DOT_MARGIN_MM = getattr(S, "CAL_DOT_MARGIN_MM", 15.0)
 CAL_DOT_PRESS_MM = getattr(S, "CAL_DOT_PRESS_MM", 1.0)
 CAL_DOT_COLOR = getattr(S, "CAL_DOT_COLOR", "auto")
 CAL_DOTS_PER_DIP = getattr(S, "CAL_DOTS_PER_DIP", 4)
+# the lowest a dot may be pressed: the machine's lowest allowed Z (zero.g frame: Z 0 is the paper, below it is fine),
+# else 0.3 (a machine whose Z 0 is the bottom of its travel)
+Z_FLOOR = float(getattr(S, "MACHINE_Z_MIN", 0.3))
 LENS_FILE = getattr(S, "LENS_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "lens.json"))
 
 
@@ -76,15 +79,21 @@ def plan_dots(rect, nlong, nshort):
 
 def pick_dish(pools, color, cfg):
     """The biggest pool of the colour that is a real DISH: the same rules paint.py uses (round enough, big enough, near the dip
-    position), so a streak or a splash of that colour is not taken for the dish.
+    position, inside the machine's travel), so a streak or a splash of that colour is not taken for the dish.
     color "auto": the darkest paint there is (the black dish when there is one, as the probes do; dots show best dark)."""
-    near = lambda p: np.hypot(p["center_mm"][0] - cfg["dip_x"], p["center_mm"][1] - cfg["dip_y"]) <= cfg["palette_radius"]
+    near = lambda p: (np.hypot(p["center_mm"][0] - cfg["dip_x"], p["center_mm"][1] - cfg["dip_y"]) <= cfg["palette_radius"]
+                      and PT.reachable(p))
     if color in ("auto", "black"):
         dishes = [p for p in pools if p["roundness"] >= cfg["min_roundness"] and p["area_mm2"] >= cfg["min_pool_area"] and near(p)]
         dark = sorted([p for p in dishes if p.get("dark")], key=lambda p: -p["area_mm2"])
         if dark:
             print(f"dots painted with black (the dark dish at X {dark[0]['center_mm'][0]:.0f} Y {dark[0]['center_mm'][1]:.0f})")
             return dark[0]["center_mm"][0], dark[0]["center_mm"][1], dark[0]["radius_mm"]
+        cups = getattr(S, "CUPS", None) or {}
+        if "black" in cups:                                     # a fixed holder: black is where its cup is (no colour to find)
+            bx, by = cups["black"]
+            print(f"dots painted with black (the black cup of CUPS at X {bx:.0f} Y {by:.0f})")
+            return float(bx), float(by), 0.5 * float(getattr(S, "CUP_WIDTH_MM", 16.2))
         if color == "auto":
             color = "blue" if any(PT.hue_name(p["hue"]) == "blue" for p in dishes) else (PT.hue_name(dishes[0]["hue"]) if dishes else "blue")
             print(f"no black dish: the dots are painted with {color}")
@@ -103,7 +112,7 @@ def pick_dish(pools, color, cfg):
 def build_gcode(dots, dish, cfg, per_dip, press, dwell_ms):
     """The painter's own dip (spiral, wipe) + a vertical press for every dot. Returns the G-code lines."""
     P = PT.Painter(cfg)
-    z_dot = max(0.3, cfg["z_paint"] - press)
+    z_dot = max(Z_FLOOR, cfg["z_paint"] - press)
     for k, (x, y) in enumerate(dots):
         if k % per_dip == 0:
             P._dip_and_travel(x, y, dish)                       # ends above (x, y) at travel height
@@ -358,6 +367,13 @@ def main(argv=None):
     if det is None:
         raise SystemExit("no paper found in the picture (is the toolhead in view?)")
     rect = inner_rect(det["corners_mm"], CAL_DOT_MARGIN_MM)
+    reach = (max(rect[0], S.MACHINE_X_MIN + 1), min(rect[1], S.MACHINE_X_MAX - 1),     # a sheet wider than the travel: only the
+             max(rect[2], S.MACHINE_Y_MIN + 1), min(rect[3], S.MACHINE_Y_MAX - 1))     # part the brush can reach gets dots
+    if reach != rect:
+        print(f"the paper reaches past the machine's travel: dots only in X {reach[0]:.0f}..{reach[1]:.0f}, Y {reach[2]:.0f}..{reach[3]:.0f}")
+        if reach[1] - reach[0] < 40 or reach[3] - reach[2] < 40:
+            raise SystemExit("too little of the paper is within reach for dots")
+        rect = reach
     dots = plan_dots(rect, CAL_DOTS_X, CAL_DOTS_Y)
     ux = sorted({round(p[0], 3) for p in dots})
     uy = sorted({round(p[1], 3) for p in dots})
@@ -365,7 +381,7 @@ def main(argv=None):
     pools = V.find_pools(frame1, H, det["corners_px"])
     dish = pick_dish(pools, a.color, cfg)
     code = "\n".join(build_gcode(dots, dish, cfg, CAL_DOTS_PER_DIP, CAL_DOT_PRESS_MM, S.DOT_DWELL_MS))
-    z_dot = max(0.3, cfg["z_paint"] - CAL_DOT_PRESS_MM)
+    z_dot = max(Z_FLOOR, cfg["z_paint"] - CAL_DOT_PRESS_MM)
     print(f"paper {det['size_mm'][0]:.0f} x {det['size_mm'][1]:.0f} mm; {len(dots)} dots in X {rect[0]:.0f}..{rect[1]:.0f}, Y {rect[2]:.0f}..{rect[3]:.0f} "
           f"(spacing {spacing:.0f} mm); dish {a.color} at X {dish[0]:.0f} Y {dish[1]:.0f}")
     print(f"dots are pressed at machine Z {z_dot:.2f} (contact {contact:.2f} - {CAL_DOT_PRESS_MM:g} mm); a dip every {CAL_DOTS_PER_DIP} dots")
