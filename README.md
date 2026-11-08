@@ -29,7 +29,8 @@ The full illustrated walk-through is in [docs/system_workflow.pdf](docs/system_w
 
 - A 3-axis G-code machine (XY plotter with a Z axis) on a serial port, Marlin-style commands (`G0/G1`, `M204`, `M400`).
 - A brush in the toolhead, paint dishes on the table beside the paper.
-- A USB camera above the table that sees the whole sheet and the dishes (1920×1080 used here).
+- A camera above the table that sees the whole sheet and the dishes: a USB camera (1920×1080 used here) or a network
+  camera stream (MJPEG over HTTP or RTSP, set `CAMERA_URL` in `settings.py`).
 
 ## Install
 
@@ -44,9 +45,13 @@ pip install -r requirements.txt
 All numbers live in **[settings.py](settings.py)**: serial port, camera, heights, speeds, dish positions, line and
 signature options. Every setting has a comment explaining it. Start with:
 
-- `SERIAL_PORT`, `CAMERA_INDEX`: check with `python serial_test.py` and `python preview.py --list`.
+- `SERIAL_PORT`, `CAMERA_URL` / `CAMERA_INDEX`: check with `python serial_test.py` and `python preview.py` (`--list` finds
+  USB cameras; `CAMERA_URL = None` uses the USB camera).
 - `TOUCH_Z`: the machine Z where the brush tip touches the paper (rough; the probes measure it exactly).
 - `SIGNATURE`: a picture of your signature (black on white), or `None` for no signature.
+
+Settings that only apply to your own computer (your machine, your camera) go in `settings_local.py` next to
+`settings.py`: it is not in git, it is read last and what it sets wins, e.g. `SERIAL_PORT = "COM3"`.
 
 Then calibrate the camera:
 

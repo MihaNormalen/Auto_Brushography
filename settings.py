@@ -147,7 +147,9 @@ SERIAL_PORT = "COM9"
 SERIAL_BAUD = 115200
 SERIAL_TIMEOUT = 5
 
-CAMERA_INDEX = 0
+CAMERA_URL = None          # a network camera (MJPEG over HTTP, or RTSP), e.g. "http://camera.local:8080/stream"; its size is
+                           #   set on the camera itself. None = the USB camera CAMERA_INDEX
+CAMERA_INDEX = 0           # the USB camera (only used when CAMERA_URL = None)
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 CAMERA_EXPOSURE = -5
@@ -347,3 +349,12 @@ JUDGE_BY_DIFFERENCE = True   # the final photo is judged against the start photo
 
 # terminal
 VERBOSE = False            # False = key lines only; True = everything
+
+
+# =============================== PERSONAL OVERRIDES ==================================================
+# settings_local.py (next to this file, NOT in git: .gitignore) may set any of the values above for this computer only,
+# e.g. another machine, camera or H4XX0R = True. It is read last, so what it sets wins. Without the file nothing changes.
+try:
+    from settings_local import *          # noqa: F401,F403
+except ImportError:
+    pass
