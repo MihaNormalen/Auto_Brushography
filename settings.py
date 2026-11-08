@@ -73,7 +73,7 @@ ARTWORK = None             # e.g. "PoletnaModra.png": then you can run  python p
 OUTPUT = None              # e.g. "out.gcode"  (None = the artwork's name + .gcode)
 ARTWORK_WIDTH_MM = None    # None = as large as fits on the paper
 ROTATE = "auto"            # "auto" = the artwork is turned by 90 degrees when it then fits larger (landscape art on portrait paper), 0 = never, 90 = always
-H4XX0R = False             # True = every program in the h4xx0r theme (the same as --h4xx0r: paint, preview, calibrate*)
+H4XX0R = True             # True = every program in the h4xx0r theme (the same as --h4xx0r: paint, preview, calibrate*)
 SIGNATURE = "podpis2.png"  # painted FIRST (right after the probes), in the bottom margin under the artwork's right edge. None = no signature
 SIGN_INSIDE = True         # True: the signature goes INSIDE the artwork's bottom right corner (no extra bottom margin: the artwork is
                            # bigger, and paints over the signature where they meet). False: in its own margin under the artwork
@@ -190,6 +190,8 @@ PROBE_ASK = False               # True = show the probe plan and ask "Paint the 
 PROBE_COUNT = 2                 # 4 = one line along each edge: touch height, width curve, brush offset AND the tilt of the paper (checked).
                                 # 2 = left + right edge only (the paper lies flattest there): the height follows a straight slope from one
                                 #     line to the other, the brush offset along the lines comes from the last probe; no cross-check
+PROBE_PAIR = ("top", "bottom")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
+                                #     sides are bent (2026-11-08, the big 411 x 277 sheet). Top / bottom as the camera picture shows them
 PROBE_LINE_MM = 80.0            # length of each line (centred on its edge; one dip has to last for it)
 PROBE_STEP_STROKES = False      # 2026-11-01: ko/15 with True looked worse to the user. (with PROBE_COUNT = 2) a row of short strokes along the TOP edge, each landed and lifted exactly like an
                                 # artwork line at its own depth: the touch height and the width curve are taken from THEM (the sloping
@@ -207,7 +209,7 @@ PROBE_RETRIES = 0               # when a line already marks at its start: paint 
 PROBE_RETRY_MM = 1.0            # ... each retry starts this much higher
 PROBE_APPLY_OFFSET = True       # True = shift the job by where the probes saw the paint land (brush tip offset). False = paint where told
 PROBE_FILE = "probe_result.json"   # where the probe result is saved and read from (next to the scripts)
-PROBE_ABOVE_MM = 2.0           # a ramp starts this far ABOVE the contact you expect (in the air); the real contact varies over the paper ...
+PROBE_ABOVE_MM = 4.0           # (2026-11-08: 4 for the big 411 x 277 sheet, it touched above 4.55; was 2.0) a ramp starts this far ABOVE the contact you expect (in the air); the real contact varies over the paper ...
 PROBE_BELOW_MM = 4.0            # ... and ends this far below it (never below machine Z 0.3). The deepest point measured = the widest
                                 # mark a job uses: 3.0 stopped at 2.75 mm deep / 2.88 mm wide while the line was still widening (2026-10-25)
 PAINT_COLOR = "auto"           # "black" = the whole artwork is painted in black, whatever colours the picture has (by design);
@@ -325,8 +327,8 @@ REPAIR_MIN_PROGRESS = 1.25   # stop when a pass keeps more than this fraction of
 REPAIR_MIN_STROKE_MM = 1.2   # repair strokes shorter than this are not painted (they would only be dots)
 REPAIR_WIDTH_SHARE = 0.9     # a repair stroke is pressed for at most this share of the widest mark (less deep = paler)
 REPAIR_PASSES = 1000         # at most this many repair passes (1000 = until done or no progress; REPAIR_MIN_PROGRESS stops it)
-REPAIR_STEP_MM = 0.15        # each repair pass presses this much deeper than the one before ...
-REPAIR_MAX_DEEPER_MM = 1.0   # ... but never more than this below the first pass
+REPAIR_STEP_MM = 0.3         # each repair pass presses this much deeper than the one before (2026-11-08: was 0.15) ...
+REPAIR_MAX_DEEPER_MM = 2.0   # ... but never more than this below the first pass (was 1.0); never below machine Z 0.3 either
 REPAIR_MAX_SHIFT_MM = 1.5    # no repair when the paint sits further than this from where the plan put it (the photo would mislead it)
 REPAIR_LINE_MAX_MM = 2.5     # thin lines of the artwork (narrower than this) are checked along their centre line ...
 REPAIR_LINE_NEAR_MM = 0.7    # ... and repainted where no paint lies within this distance of it ...

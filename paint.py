@@ -3183,7 +3183,7 @@ class Photos:
                 cv2.imwrite(name, frame)
                 self.overlay(frame, name)
                 self.gif_frames.append(("final" if k == 0 else f"repair{k}", frame.copy()))
-                extra = min(deepest, step * min(k + 1, 2))                             # cycle 1 = 0.15 deeper, cycle 2 = 0.30, then no deeper (only persistent spots repeat)
+                extra = min(deepest, step * (k + 1))                                   # every cycle one REPAIR_STEP_MM deeper, up to REPAIR_MAX_DEEPER_MM
                 lines, n_gap, per = gap_repair_gcode(frame, self.art, H, self.dip_blocks_plan, self.cfg, extra,
                                                      persist=(self.prev_gap if k >= 2 else None))
                 self.prev_gap = LAST_GAP

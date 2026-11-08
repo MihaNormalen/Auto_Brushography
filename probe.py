@@ -39,7 +39,8 @@ PROBE_SAMPLE_MM = float(getattr(S, "PROBE_SAMPLE_MM", 1.0))     # one point of t
 PROBE_ABOVE_MM = float(getattr(S, "PROBE_ABOVE_MM", 1.0))       # the line starts this far ABOVE the expected contact (in the air)
 PROBE_BELOW_MM = float(getattr(S, "PROBE_BELOW_MM", 3.0))
 PROBE_COUNT = int(getattr(S, "PROBE_COUNT", 4))                   # 4 = one line per edge (touch + tilt); 2 = left + right only
-PROBE_SIDES = ("left", "right", "top", "bottom") if PROBE_COUNT >= 4 else ("left", "right")   # 2: the paper lies flattest there (user, 2026-11-01)
+PROBE_SIDES = (("left", "right", "top", "bottom") if PROBE_COUNT >= 4                      # 2: PROBE_PAIR, left + right by default:
+               else tuple(getattr(S, "PROBE_PAIR", ("left", "right"))))                      # the paper lies flattest there (user, 2026-11-01)
 PROBE_LINE_MM = float(getattr(S, "PROBE_LINE_MM", 80.0))          # ONE line per side, this long at most, centred on its edge: one dip covers it
 PROBE_RETRY_MM = float(getattr(S, "PROBE_RETRY_MM", 1.0))         # when lines touch at their start, the start is raised by this much and all lines are painted again
 PROBE_RETRIES = int(getattr(S, "PROBE_RETRIES", 0))               # 0 = one probe only (retries repaint the same lines on top of the old marks)               # at most this many such retries          # each side is split into pieces of at most this length; every piece gets its own dip and its own ramp       # and ends this far BELOW it
