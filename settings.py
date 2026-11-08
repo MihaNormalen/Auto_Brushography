@@ -193,7 +193,12 @@ PROBE_COUNT = 2                 # 4 = one line along each edge: touch height, wi
                                 #     line to the other, the brush offset along the lines comes from the last probe; no cross-check
 PROBE_PAIR = ("top", "bottom")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
                                 #     sides are bent (2026-11-08, the big 411 x 277 sheet). Top / bottom as the camera picture shows them
-PROBE_LINE_MM = 140.0            # length of each line (centred on its edge; one dip has to last for it)
+PROBE_LINE_MM = 140.0            # the LONGEST a probe line may be. Its real length is set so the ramp gets PROBE_BELOW_MM below the
+                                 #   expected touch within what one dip paints (measured by the last probe, probe_reach.json)
+PROBE_LINE_MIN_MM = 50.0        # ... and the shortest: an edge with less free room (no paint) is not used
+PROBE_CLEAR_MM = 8.0            # new probe lines keep this far from paint already along the edge (old probe lines, any day): the
+                                #   camera finds the free stretches; no room on the PROBE_PAIR edges = the other pair is used
+PROBE_REACH_MM = 50.0           # how far one dip paints after the touch, until a probe has measured it
 PROBE_STEP_STROKES = False      # 2026-11-01: ko/15 with True looked worse to the user. (with PROBE_COUNT = 2) a row of short strokes along the TOP edge, each landed and lifted exactly like an
                                 # artwork line at its own depth: the touch height and the width curve are taken from THEM (the sloping
                                 # lines only give the tilt between left and right). False = height and curve from the sloping lines
@@ -335,6 +340,10 @@ REPAIR_TAPER_MIN_MM = 1.5    # ... but at least this ...
 REPAIR_TAPER_MAX_MM = 6.0    # ... and at most this (mm). False / REPAIR_TAPER = False = the old square-ended repair strokes
 REPAIR_FADED_SHARE = 0.5     # black that is painted but less than this share as dark as the job's well-painted strokes counts as
                              #   missing too: the repair gives it a second coat. 0 = off (only empty spots are repaired)
+SPUR_MARKS = 2.0             # a short stroke (under this many x the brush's thinnest mark, from the probe) whose spot the strokes
+SPUR_COVERED = 0.6           #   around it already paint for this share is left out: a side branch that only lands a knob on a line
+DOT_DAB_MARKS = 1.2          # a mark shorter than this many x the thinnest mark is a DOT: straight down, DOT_DWELL_MS, straight up
+DOT_DWELL_MS = 120           #   (round, no comma tail from gliding in). 0 = dots are painted like lines
 REPAIR_EDGE_INSIDE = True    # a repair stroke's EDGE (not its centre) goes on the artwork's outline: a brush wider than the missing
                              #   strip lies over the paint already there instead of sticking out as a bulge ('stairs'). False = centred
 REPAIR_TAPER_MAX_TURN_DEG = 30.0   # a run stops where it would cut across the painted lines around it by more than this (degrees)

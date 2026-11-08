@@ -1591,7 +1591,35 @@ def plan_strokes(mask, cfg, res=RES):
         if len(simple) == n_before:
             break
     simple = [q if getattr(q, "keep_turns", False) else cut_spur(q, res) for q in simple]   # no stroke goes out and comes back over itself
+    simple = drop_covered_spurs(simple, mask.shape, cfg, res)
     return simple, kinds
+
+
+def drop_covered_spurs(strokes, shape, cfg, res=RES):
+    """A short stroke (under SPUR_MARKS x the brush's thinnest mark) whose footprint the OTHER strokes already paint for the most
+    part (SPUR_COVERED) is left out: it is a little side branch of the centre line where a shape's edge has a bump, and painted
+    it only lands a blob on the line - knobs the artwork does not have (2026-11-08 ko/76: 58 of them with a 2.15 mm brush).
+    Short marks standing alone (dots) are kept. Relative to the brush: its thinnest mark from the probe curve."""
+    k = float(getattr(S, "SPUR_MARKS", 2.0) or 0.0)
+    if k <= 0 or not strokes:
+        return strokes
+    w_min = float(cfg["curve"][1][0]) if cfg.get("curve") is not None else float(cfg["brush_w"])
+    lim = k * w_min * res
+    cand = [i for i, s in enumerate(strokes) if len(s) >= 2 and path_length(s) < lim]
+    if not cand:
+        return strokes
+    cset = set(cand)
+    others = render([s for i, s in enumerate(strokes) if i not in cset], shape, cfg["brush_w"], res)
+    share = float(getattr(S, "SPUR_COVERED", 0.6))
+    drop = set()
+    for i in cand:
+        own = render([strokes[i]], shape, cfg["brush_w"], res)
+        n = int(own.sum())
+        if n and (own & others).sum() >= share * n:
+            drop.add(i)
+    if drop:
+        vprint(f"   {len(drop)} short side branches left out (their spot is painted by the strokes around them; SPUR_MARKS)")
+    return [s for i, s in enumerate(strokes) if i not in drop]
 
 
 # ----------------------------------------------------------------------------------------------- ordering
@@ -1872,6 +1900,25 @@ class Painter:
                 path = path[::-1]
                 zs = zs[::-1] if zs else None
                 wk = wk[::-1] if wk else None
+            # a DOT (a mark shorter than DOT_DAB_MARKS x the brush's thinnest mark): straight down at its middle, a short stand, straight
+            # up - round like the artwork's dots. Glided in like a line it dragged a tail: commas instead of dots (2026-11-08 ko/76)
+            w_min = float(c["curve"][1][0]) if c.get("curve") is not None else float(c["brush_w"])
+            dab_k = float(getattr(S, "DOT_DAB_MARKS", 1.2) or 0.0)
+            if kind == "line" and has_w and dab_k > 0 and path_length(path) < dab_k * w_min and getattr(path, "group", None) != "signature":
+                mx, my = float(np.mean([p[0] for p in path])), float(np.mean([p[1] for p in path]))
+                zd = min(zs)                                                   # as deep as the dot's widest point
+                if self.dist_since_dip + w_min > self.current_max_dist:
+                    self._dip_and_travel(mx, my, dish=self.dish)
+                self._set_speed("travel")
+                self.gcode.append(f"; dot: straight down, {int(getattr(S, 'DOT_DWELL_MS', 120))} ms, straight up")
+                self.gcode.append(f"G0 X{mx:.3f} Y{my:.3f} Z{c['z_low']:.3f}")
+                self._pen_down(zd)
+                self.gcode.append(f"G4 P{int(getattr(S, 'DOT_DWELL_MS', 120))}")
+                self.gcode.append(f"G0 Z{c['z_low']:.3f} F3000")
+                self.current_pos = (mx, my)
+                self.dist_since_dip += w_min
+                self.gcode.append("; STROKE END dot")
+                continue
             cz = zs[0] if zs else z_down
             glide = kind == "line" and zs is not None and len(path) >= 2 and float(getattr(S, "LINE_LEAD_IN_MM", 0.0)) > 0
             one_stroke = glide and bool(getattr(S, "LINE_ONE_STROKE", False))   # never a dip in the middle of this line
