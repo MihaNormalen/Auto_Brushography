@@ -1942,7 +1942,8 @@ class Painter:
             tilt = c.get("tilt")
             if tilt:                                                           # the paper is not level (measured by the probes): every Z follows it
                 base = zs if zs else [z_down] * len(path)
-                zs = [z + tilt[0] * (px_ - tilt[2]) + tilt[1] * (py_ - tilt[3]) for z, (px_, py_) in zip(base, path)]
+                zs = [max(Z_MIN, z + tilt[0] * (px_ - tilt[2]) + tilt[1] * (py_ - tilt[3]))      # the tilt comes after the depth's own
+                      for z, (px_, py_) in zip(base, path)]                                     # clamp: never below MACHINE_Z_MIN on the low side
             if kind == "line":                                                 # visible in the G-code: what this stroke does with Z
                 if has_w:
                     self.gcode.append(f"; skeleton stroke: {len(path)} points, width {min(path.widths):.2f}-{max(path.widths):.2f} mm, "
@@ -3178,8 +3179,8 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
     tilt = cfg.get("tilt")                                         # the paper is not level: every repair Z follows it, like the painting
     feed_t = int(cfg.get("feed", 12000))
 
-    def tilted(z, x, y):
-        return z + tilt[0] * (x - tilt[2]) + tilt[1] * (y - tilt[3]) if tilt else z
+    def tilted(z, x, y):                                           # never below MACHINE_Z_MIN, also where the paper sits low
+        return max(Z_MIN, z + tilt[0] * (x - tilt[2]) + tilt[1] * (y - tilt[3])) if tilt else z
     layers_r = list(lh) if lh else list(dip_blocks)                # the colours this job painted
     # REPAIR_TAPER: each repair stroke runs on over the paint around it, inside the artwork's shape, thinning out (taper_repair_stroke)
     taper = bool(getattr(S, "REPAIR_TAPER", True))
