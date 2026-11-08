@@ -42,6 +42,9 @@ PROBE_COUNT = int(getattr(S, "PROBE_COUNT", 4))                   # 4 = one line
 PROBE_SIDES = (("left", "right", "top", "bottom") if PROBE_COUNT >= 4                      # 2: PROBE_PAIR, left + right by default:
                else tuple(getattr(S, "PROBE_PAIR", ("left", "right"))))                      # the paper lies flattest there (user, 2026-11-01)
 PROBE_LINE_MM = float(getattr(S, "PROBE_LINE_MM", 80.0))          # ONE line per side, this long at most, centred on its edge: one dip covers it
+PROBE_LINE_MIN_MM = float(getattr(S, "PROBE_LINE_MIN_MM", 50.0))  # ... and at least this long (shorter: that edge has no room)
+PROBE_CLEAR_MM = float(getattr(S, "PROBE_CLEAR_MM", 8.0))         # a new line keeps this far from paint already along the edge
+PROBE_REACH_MM = float(getattr(S, "PROBE_REACH_MM", 50.0))        # how far one dip paints after the touch, until a probe has measured it
 PROBE_RETRY_MM = float(getattr(S, "PROBE_RETRY_MM", 1.0))         # when lines touch at their start, the start is raised by this much and all lines are painted again
 PROBE_RETRIES = int(getattr(S, "PROBE_RETRIES", 0))               # 0 = one probe only (retries repaint the same lines on top of the old marks)               # at most this many such retries          # each side is split into pieces of at most this length; every piece gets its own dip and its own ramp       # and ends this far BELOW it
 PROBE_MARGIN_MM = float(getattr(S, "PROBE_MARGIN_MM", 0.25))    # paint reference = touch height minus this (deeper)
@@ -56,6 +59,7 @@ PROBE_STEP_ABOVE_MM = float(getattr(S, "PROBE_STEP_ABOVE_MM", 0.75))
 PROBE_STEP_BELOW_MM = float(getattr(S, "PROBE_STEP_BELOW_MM", 2.75))
 PROBE_FILE = os.path.join(HERE, getattr(S, "PROBE_FILE", "probe_result.json"))   # a plain name = next to the scripts
 SHEET_FILE = os.path.join(HERE, "probe_sheet.json")             # where the last sheet was and how many probes it has had
+REACH_FILE = os.path.join(HERE, "probe_reach.json")             # how far the last brush painted on one dip after the touch
 PROBE_OFFSET_MAX_MM = float(getattr(S, "PROBE_OFFSET_MAX_MM", 6.0))          # a measured tip offset larger than this is not used
 PROBE_OFFSET_SCATTER_MM = float(getattr(S, "PROBE_OFFSET_SCATTER_MM", 0.5))  # ... nor one where the lines disagree with the fit by more
 Z_MIN = 0.3                                                      # the machine is never sent below this Z
@@ -94,31 +98,127 @@ def plan_probes(pf, contact_guess):
     return probes
 
 
-def plan_probes_on_sheet(corners_mm, contact_guess, slot=0):
+EDGES = {"left": (3, 0), "right": (2, 1), "top": (0, 1), "bottom": (3, 2)}   # corners tl, tr, br, bl: from -> to along each edge
+
+
+def paint_reach_mm():
+    """How far the brush painted on one dip after the touch, as the last probe measured it (probe_reach.json), else PROBE_REACH_MM."""
+    try:
+        return max(10.0, float(json.load(open(REACH_FILE))["reach_mm"]))
+    except Exception:
+        return PROBE_REACH_MM
+
+
+def note_reach(probes, results):
+    """After every probe (also one without a result): how far the paint lasted after the touch. A line that ran out gives the
+    reach itself; lines that never ran out only say it is at least what they painted."""
+    ran_out = [r["starved_at_mm"] - r["s_contact"] for r in results if r.get("ok") and "starved_at_mm" in r]
+    lasted = [p["length"] - r["s_contact"] for p, r in zip(probes, results) if r.get("ok") and "starved_at_mm" not in r]
+    if ran_out:
+        reach, how = min(ran_out), "ran out"
+    elif lasted:
+        reach, how = max(min(lasted), paint_reach_mm()), "lasted to the end"
+    else:
+        return
+    json.dump({"reach_mm": round(float(reach), 1), "how": how, "created": time.strftime("%Y-%m-%d %H:%M:%S")}, open(REACH_FILE, "w"))
+
+
+def ramp_length():
+    """How long a probe line is: steep enough that the part BELOW the expected touch (PROBE_BELOW_MM deeper) is painted within
+    80 % of what one dip lasts (paint_reach_mm): a brush that holds little paint gets a steeper ramp and still shows how wide it
+    can paint (2026-11-08: 140 mm lines ran out of paint 13 mm after the touch). Within PROBE_LINE_MIN_MM .. PROBE_LINE_MM."""
+    need = (PROBE_ABOVE_MM + PROBE_BELOW_MM) * 0.8 * paint_reach_mm() / max(PROBE_BELOW_MM, 0.1)
+    return float(min(PROBE_LINE_MM, max(need, PROBE_LINE_MIN_MM)))
+
+
+def _free_line(frame, H_inv, C, centre, ia, ib, L_want):
+    """Where a probe line fits along one edge without touching paint already there (old probe lines of any sheet or day): the
+    camera picture is read along the strip the line would use; what is darker than the paper there, plus PROBE_CLEAR_MM, is
+    taken. Returns (start, direction, inside normal, length) for the longest free stretch, as near the edge's middle as it fits,
+    at most L_want and at least PROBE_LINE_MIN_MM long - or None (no room on this edge)."""
+    A, B = C[ia], C[ib]
+    L_edge = float(np.linalg.norm(B - A))
+    d = (B - A) / L_edge
+    nrm = np.array([-d[1], d[0]])
+    if np.dot(nrm, centre - A) < 0:
+        nrm = -nrm
+    s = np.arange(0.0, L_edge, 1.0)
+    across = np.linspace(PROBE_INSET_MM - 2.5, PROBE_INSET_MM + 2.5, 6)
+    pts = A[None, None, :] + s[:, None, None] * d + across[None, :, None] * nrm
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    px = np.round(V.mm_to_px_array(H_inv, pts.reshape(-1, 2))).astype(int)
+    inside = (px[:, 0] >= 0) & (px[:, 0] < gray.shape[1]) & (px[:, 1] >= 0) & (px[:, 1] < gray.shape[0])
+    g = np.zeros(len(px), float)
+    g[inside] = gray[px[inside, 1], px[inside, 0]]
+    g = g.reshape(len(s), len(across))
+    paper = float(np.percentile(g[g > 0], 85)) if (g > 0).any() else 255.0
+    taken = ((g < 0.75 * paper) | (g == 0)).any(axis=1)                    # paint (or outside the picture) across the strip
+    k = int(round(PROBE_CLEAR_MM))
+    taken = np.convolve(taken.astype(int), np.ones(2 * k + 1, int), mode="same") > 0
+    ok = ~taken & (s >= PROBE_END_MM) & (s <= L_edge - PROBE_END_MM)
+    best = None
+    i = 0
+    while i < len(s):
+        if not ok[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(s) and ok[j + 1]:
+            j += 1
+        a, b = s[i], s[j]
+        Lt = min(L_want, b - a)
+        if Lt >= PROBE_LINE_MIN_MM:
+            c = float(np.clip(0.5 * L_edge, a + 0.5 * Lt, b - 0.5 * Lt))     # as near the edge's middle as the stretch allows
+            key = (round(Lt), -abs(c - 0.5 * L_edge))
+            if best is None or key > best[0]:
+                best = (key, c, Lt)
+        i = j + 1
+    if best is None:
+        return None
+    _, c, Lt = best
+    return A + PROBE_INSET_MM * nrm + (c - 0.5 * Lt) * d, d, nrm, Lt
+
+
+def plan_probes_on_sheet(corners_mm, contact_guess, slot=0, frame=None):
     """Probe lines inside each PROBE_INSET_MM from its OWN sheet edge (corners tl, tr, br, bl in machine mm). One line per side,
-    at most PROBE_LINE_MM long, with its own dip and its own ramp from PROBE_ABOVE_MM above the expected contact down to
-    PROBE_BELOW_MM below it (so the ramp reaches the wide end).
-    slot = how many probes this sheet already had: the lines move along their edge (centre, then one line length to one side,
-    then to the other) so they never land on the old marks - the before/after photo would see no new paint there."""
+    ramp_length() long (steep enough for what one dip paints), with its own dip and its own ramp from PROBE_ABOVE_MM above the
+    expected contact down to PROBE_BELOW_MM below it.
+    frame (the camera picture before the probe): each line goes where its edge is still FREE of paint (_free_line); with
+    PROBE_COUNT = 2 and no room on the PROBE_PAIR edges, the other pair is used; no room anywhere = SystemExit before anything
+    moves. Without a frame: the old way, moved along the edge by `slot` (how many probes this sheet already had)."""
     C = np.array(corners_mm, float)
     centre = C.mean(axis=0)
-    inset, end, ds = PROBE_INSET_MM, PROBE_END_MM, PROBE_SAMPLE_MM
+    ds = PROBE_SAMPLE_MM
     z_start = contact_guess + PROBE_ABOVE_MM
     z_end = max(Z_MIN, contact_guess - PROBE_BELOW_MM)
-    spec = [s for s in [("left", 3, 0), ("right", 2, 1), ("top", 0, 1), ("bottom", 3, 2)] if s[0] in PROBE_SIDES]
+    L_want = ramp_length()
+    if frame is None:
+        places = {n: _edge_line(C, centre, *EDGES[n], L_want, slot) for n in PROBE_SIDES}
+    else:
+        H_inv = V.load_calibration()["H_inv"]
+        tries = [tuple(PROBE_SIDES)]
+        if PROBE_COUNT < 4:
+            tries.append(("top", "bottom") if set(PROBE_SIDES) == {"left", "right"} else ("left", "right"))
+        places = None
+        for sides in tries:
+            got = {n: _free_line(frame, H_inv, C, centre, *EDGES[n], L_want) for n in sides}
+            if all(v is not None for v in got.values()):
+                places = got
+                if sides != tuple(PROBE_SIDES):
+                    print(f"probes: no free room along the {' / '.join(PROBE_SIDES)} edges (paint already there): "
+                          f"the lines go along {' / '.join(sides)} instead")
+                break
+        if places is None:
+            raise SystemExit("PROBE STOPPED before the machine moved: no free place for probe lines along the sheet's edges "
+                             f"(each needs at least {PROBE_LINE_MIN_MM:g} mm without paint, {PROBE_CLEAR_MM:g} mm clear of old marks). "
+                             "Use a new sheet, or run with --no_probe / --probe_file. Nothing was painted.")
     probes = []
-    for name, ia, ib in spec:
-        start0, d, nrm, L_total = _edge_line(C, centre, ia, ib, PROBE_LINE_MM, slot)
-        npieces = 1
-        plen = L_total
-        for k in range(npieces):
-            nsamp = max(2, int(round(plen / ds)))
-            L = nsamp * ds
-            start = start0 + k * plen * d
-            p = {"name": name if npieces == 1 else f"{name} {k + 1}", "start": start.tolist(), "dir": d.tolist(),
-                 "normal": nrm.tolist(), "length": float(L), "seg": ds, "z_start": float(z_start), "z_end": float(z_end)}
-            p["z_steps"] = [float(zpath(p, (i + 0.5) * ds)) for i in range(nsamp)]
-            probes.append(p)
+    for name, (start, d, nrm, L_total) in places.items():
+        nsamp = max(2, int(round(L_total / ds)))
+        p = {"name": name, "start": np.asarray(start).tolist(), "dir": np.asarray(d).tolist(), "normal": np.asarray(nrm).tolist(),
+             "length": float(nsamp * ds), "seg": ds, "z_start": float(z_start), "z_end": float(z_end)}
+        p["z_steps"] = [float(zpath(p, (i + 0.5) * ds)) for i in range(nsamp)]
+        probes.append(p)
     return probes
 
 
@@ -916,8 +1016,10 @@ def run_probes(machine, cfg, frame, det, yes=False, color=None, ask=True, questi
         dish = pick_dish(pools, used, cfg)
     slot = max(sheet_probe_count(det), 1 if reusable_result(det, frame) else 0)
     if slot:
-        print(f"this sheet already has {slot} set(s) of probe lines: the new lines go beside them along each edge")
-    probes = plan_probes_on_sheet(det["corners_mm"], guess, slot)
+        print(f"this sheet already has {slot} set(s) of probe lines: the new lines go where the edges are still free")
+    print(f"probe lines {ramp_length():.0f} mm: the last brush painted about {paint_reach_mm():.0f} mm after the touch on one dip, "
+          f"so the ramp reaches {PROBE_BELOW_MM:g} mm below the expected touch within that")
+    probes = plan_probes_on_sheet(det["corners_mm"], guess, slot, frame=frame)
     print(paper_check_text(probes, det["corners_mm"]))
     import settings as _S
     inset_s = float(getattr(_S, "PROBE_INSET_MM", 5.0))
@@ -953,15 +1055,15 @@ def run_probes(machine, cfg, frame, det, yes=False, color=None, ask=True, questi
     while True:
         if attempt > 0:
             guess = guess + PROBE_RETRY_MM
-            probes = plan_probes_on_sheet(det["corners_mm"], guess, slot + attempt)
+            cap = V.open_camera()
+            frame, live = PT.capture_fresh(cap)                       # the paper now carries the earlier marks: they become the 'before'
+            cap.release()                                             # ... and the new lines go where the edges are still free
+            cv2.imwrite(BEFORE, frame)
+            probes = plan_probes_on_sheet(det["corners_mm"], guess, slot + attempt, frame=frame)
             steps = plan_step_row(det["corners_mm"], guess, slot + attempt)
             code = PT.shift_gcode_xy(build_gcode(probes, dish, cfg, guess, steps), -applied[0], -applied[1])
             plan = {"probes": probes, "pf": pf, "dish": list(dish), "contact_guess": guess, "applied_offset": applied, "steps": steps}
             json.dump(plan, open(PLAN, "w"), indent=1)
-            cap = V.open_camera()
-            frame, live = PT.capture_fresh(cap)                       # the paper now carries the earlier marks: they become the 'before'
-            cap.release()
-            cv2.imwrite(BEFORE, frame)
             print(f"\nRETRY {attempt}: some lines touched at their start, so the start is raised by {PROBE_RETRY_MM:.1f} mm "
                   f"(to Z {guess + PROBE_ABOVE_MM:.2f}) and all lines are painted again, beside the first ones")
         note_sheet_probe(det, slot + attempt + 1)
@@ -974,6 +1076,7 @@ def run_probes(machine, cfg, frame, det, yes=False, color=None, ask=True, questi
         cap.release()
         cv2.imwrite(AFTER, frame2)
         probes, results, sol = analyse(frame, frame2, plan, cal, det["corners_px"], guess)
+        note_reach(probes, results)                                # how far one dip lasted: the next probe's ramp is made for it
         report_picture(frame2, probes, results, cal, "probe_result.png", sol, plan.get("steps"))
         print("picture: probe_result.png (yellow = the lines, red cross = the touch point on each line, with its Z)")
         if sol is not None:
@@ -1039,7 +1142,7 @@ def main(argv=None):
     if a.plan_only:
         pf = cfg["paper_frame"]
         slot = max(sheet_probe_count(det), 1 if reusable_result(det, frame) else 0)
-        probes = plan_probes_on_sheet(det["corners_mm"], contact, slot)
+        probes = plan_probes_on_sheet(det["corners_mm"], contact, slot, frame=frame)
         pools = V.find_pools(frame, cal["H"], det["corners_px"])
         dish = pick_dish(pools, a.color, cfg)
         plan_path = plan_picture(frame, probes, dish, cal, "probe_plan.png", det, plan_step_row(det["corners_mm"], contact, slot))
