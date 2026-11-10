@@ -242,17 +242,30 @@ def _edge_line(C, centre, ia, ib, L_want, slot):
     return start0 + shifts[slot % len(shifts)] * d, d, nrm, L_total
 
 
-def plan_step_row(corners_mm, contact_guess, slot=0):
-    """PROBE_STEP_STROKES: a row of short strokes along the top edge (free with PROBE_COUNT = 2), each painted like an artwork
-    stroke (glide in, a constant depth, glide out) at depths from PROBE_STEP_ABOVE_MM above the expected contact down to
-    PROBE_STEP_BELOW_MM below it. Their widths give the width curve AS STROKES ARE PAINTED (2026-11-01: on ko/14 the
-    artwork came out ~2.5 mm wide whatever the ramp curve planned - the ramp descends gently, a stroke lands steeply).
-    None when off, or when the top edge carries a ramp line (PROBE_COUNT = 4)."""
-    if not PROBE_STEP_STROKES or "top" in PROBE_SIDES:
+def plan_step_row(corners_mm, contact_guess, slot=0, frame=None):
+    """PROBE_STEP_STROKES: a row of strokes each painted like an artwork stroke (glide in, HOLD a constant depth, glide out) at
+    depths from PROBE_STEP_ABOVE_MM above the expected contact down to PROBE_STEP_BELOW_MM below it. Their widths give the width
+    curve AS STROKES ARE PAINTED: a stroke that holds its depth spreads wider than the sloping ramp passing through it (artwork
+    0.4-1.4 mm wider than the ramp's curve, 2026-11-09). The row goes along an edge the ramp lines do not use, where the camera
+    (frame) sees it free of paint; without a frame along the top edge. None when off or no edge has room."""
+    if not PROBE_STEP_STROKES:
         return None
     C = np.array(corners_mm, float)
     n, sl, gap = PROBE_STEP_COUNT, PROBE_STEP_LEN_MM, PROBE_STEP_GAP_MM
-    start, d, nrm, L = _edge_line(C, C.mean(axis=0), 0, 1, n * sl + (n - 1) * gap, slot)
+    want = n * sl + (n - 1) * gap
+    place = None
+    if frame is not None:
+        H_inv = V.load_calibration()["H_inv"]
+        for name in [e for e in ("left", "right", "top", "bottom") if e not in PROBE_SIDES]:
+            place = _free_line(frame, H_inv, C, C.mean(axis=0), *EDGES[name], want)
+            if place is not None:
+                break
+        if place is None:
+            print("probe step strokes: no free edge for them (the ramp lines use the others): the curve comes from the ramp lines")
+            return None
+    else:
+        place = _edge_line(C, C.mean(axis=0), 0, 1, want, slot)
+    start, d, nrm, L = place
     n = max(3, int((L + gap) // (sl + gap)))                             # a short edge takes fewer strokes
     zs = np.linspace(contact_guess + PROBE_STEP_ABOVE_MM, max(Z_MIN, contact_guess - PROBE_STEP_BELOW_MM), n)
     strokes = [{"s0": k * (sl + gap), "s1": k * (sl + gap) + sl, "z": float(z)} for k, z in enumerate(zs)]
@@ -302,9 +315,13 @@ def build_gcode(probes, dish, cfg, contact_guess, steps=None):
         P.cfg = dict(P.cfg, z_paint=float(contact_guess), tilt=None)    # the glide's air height, as for the artwork
         P.gcode.append(f"; ===== PROBE STEP STROKES: {len(steps['strokes'])} strokes, Z {steps['strokes'][0]['z']:.2f} -> "
                        f"{steps['strokes'][-1]['z']:.2f}, landed like artwork lines =====")
-        P._dip_and_travel(*P._lead_point(o + steps["strokes"][0]["s0"] * d, -d), dish)
-        for st in steps["strokes"]:
+        # a fresh dip whenever about 60 % of what this brush paints on one dip (paint_reach_mm) is used: a whole row on one dip
+        # painted its deep end dry (a brush that runs dry after 30 mm)
+        per_dip = max(1, int(0.6 * paint_reach_mm() // max(PROBE_STEP_LEN_MM, 1.0)))
+        for i, st in enumerate(steps["strokes"]):
             a, b = o + st["s0"] * d, o + st["s1"] * d
+            if i % per_dip == 0:
+                P._dip_and_travel(*P._lead_point(a, -d), dish)
             P._set_speed("travel")
             P._land(a, (-d[0], -d[1]), st["z"])
             P.gcode.append(f"G1 X{b[0]:.3f} Y{b[1]:.3f} Z{st['z']:.3f}")
@@ -401,11 +418,16 @@ def measure_line(D, H_inv, p, w_ref=PROBE_CONTACT_WIDTH_MM):
     if k_run is not None and (widths[:k_run] > 0).any():
         widths[:k_run] = 0.0
         out["flags"].append(f"specks before {(k_run + 0.5) * seg:.0f} mm (not a continuing mark): ignored")
-    # the brush runs out of paint towards the deep end: the mark gets clearly narrower again, at two points in a row
-    runmax = np.maximum.accumulate(widths)
+    # the brush runs out of paint towards the deep end: the mark gets clearly narrower again and STAYS so for 5 mm (smoothed
+    # widths). Two narrow samples in a row were not enough: a full brush whose belly has just gone down paints a streaky mark
+    # (4.3 1.6 4.4 2.4 4.7, 2026-11-09 ko/79) and that cut the curve off at 1.25 mm as 'ran out of paint 5 mm after the touch'
+    from scipy.ndimage import median_filter
+    wf = median_filter(widths, size=5, mode="nearest")
+    runmax = np.maximum.accumulate(wf)
     stop = n
-    for i in range(1, n - 1):
-        if runmax[i] >= w_ref and runmax[i] - widths[i] >= 0.5 and runmax[i + 1] - widths[i + 1] >= 0.5:
+    hold = max(3, int(round(5.0 / seg)))
+    for i in range(1, n - hold):
+        if runmax[i] >= w_ref and (runmax[i] - wf[i:i + hold] >= 0.5).all():
             stop = i
             out["starved_at_mm"] = float((i + 0.5) * seg)
             break
@@ -426,6 +448,7 @@ def measure_line(D, H_inv, p, w_ref=PROBE_CONTACT_WIDTH_MM):
     out.update({"ok": True,
                 "z_contact": float(zs[k - 1] + f * (zs[k] - zs[k - 1])),
                 "s_contact": float((k - 0.5 + f) * seg)})                # distance along the line from its start
+    out["z_first"], out["s_first"] = out["z_contact"], out["s_contact"]  # the first continuous mark (same_touch_rule)
     # a hanging drop or the tip hairs can draw a flat ~1 mm trail long before the brush presses on the paper (2026-11-01: the top
     # line marked from Z 6.25 while it only started to widen at 4.60, the right line had no trail and widened at once at 4.37):
     # the touch is where the mark starts to WIDEN - a fit of "flat trail, then growing" over the mark up to 2.5 mm wide
@@ -461,8 +484,8 @@ def _widening_start(zs, widths, k, stop, w_top=2.5):
 
 
 def measure_steps(D, H_inv, steps):
-    """Width in the middle 2 mm of every short stroke (where its depth is constant), measured across it like the sloping lines.
-    0 = no mark (the stroke stayed in the air)."""
+    """Width of every stroke over its SECOND half (it has held its depth there and spread as an artwork stroke does), up to 1 mm
+    before its end, measured across it like the sloping lines. 0 = no mark (the stroke stayed in the air)."""
     dt = 0.2
     t_vals = np.arange(-8.0, 8.0 + 1e-9, dt)
     edge = np.abs(t_vals) > 6.8
@@ -470,7 +493,7 @@ def measure_steps(D, H_inv, steps):
     out = []
     for st in steps["strokes"]:
         mid = 0.5 * (st["s0"] + st["s1"])
-        s_vals = np.arange(mid - 1.0, mid + 1.0 + 1e-9, 0.25)
+        s_vals = np.arange(mid, max(mid + 0.5, st["s1"] - 1.0) + 1e-9, 0.25)
         I = _profiles(D, H_inv, steps, s_vals, t_vals)
         I = I - np.median(I[:, edge], axis=1, keepdims=True)
         noise = 1.4826 * float(np.median(np.abs(I[:, edge]))) + 1e-3
@@ -892,10 +915,27 @@ def applied_offset_from_last_result():
     return [0.0, 0.0]
 
 
+def same_touch_rule(results, spread=0.5):
+    """Every line's touch by the SAME rule. A brush that stays on its tip for a while before its belly comes down (sable,
+    2026-11-09 ko/81) had its tip phase taken for 'drop or tip hairs' on one line only: that line's touch went 1.5 mm below its
+    first mark, the other's 0.4 - a fake 2 mm tilt, and that half of the sheet was painted 1.5 mm too deep (fat lines). When the
+    lines' skips differ by more than `spread`, all lines use their first continuous mark instead."""
+    ok = [r for r in results if r.get("ok") and "z_first" in r]
+    skips = [r["z_first"] - r["z_contact"] for r in ok]
+    if len(ok) < 2 or max(skips) - min(skips) <= spread:
+        return
+    for r in ok:
+        r["z_contact"], r["s_contact"] = r["z_first"], r["s_first"]
+        r["flags"].append("touch = first continuous mark (the lines' tip phases differed too much to skip them)")
+    print(f"probes: the lines' tip phases before the brush widened differ ({', '.join(f'{s:.2f}' for s in skips)} mm): "
+          f"the touch is taken at the first continuous mark on every line, so they are measured alike")
+
+
 def analyse(frame1, frame2, plan, cal, det_poly, contact_guess):
     probes = plan["probes"]
     D = ink_difference(frame1, frame2, det_poly)
     results = [measure_line(D, cal["H_inv"], p) for p in probes]
+    same_touch_rule(results)
     above = [r["name"] for r in results if r.get("contact_above_range")]
     below = [r["name"] for r in results if r.get("contact_below_range")]
     steps = measure_steps(D, cal["H_inv"], plan["steps"]) if plan.get("steps") else None
@@ -1028,7 +1068,7 @@ def run_probes(machine, cfg, frame, det, yes=False, color=None, ask=True, questi
         raise SystemExit("PROBE STOPPED before the machine moved: " + "; ".join(problems) +
                          ". The sheet and the probe plan disagree. Nothing was painted.")
     applied = applied_offset_from_last_result()
-    steps = plan_step_row(det["corners_mm"], guess, slot)
+    steps = plan_step_row(det["corners_mm"], guess, slot, frame=frame)
     code = PT.shift_gcode_xy(build_gcode(probes, dish, cfg, guess, steps), -applied[0], -applied[1])
     if applied != [0.0, 0.0]:
         print(f"probe moves corrected by the last measured offset: ({-applied[0]:+.2f}, {-applied[1]:+.2f}) mm")
@@ -1039,7 +1079,7 @@ def run_probes(machine, cfg, frame, det, yes=False, color=None, ask=True, questi
     print(f"\nPROBES: {len(probes)} long lines inside the margin (mm: {lengths}), each going down from Z {probes[0]['z_start']:.2f} (air) "
           f"to Z {probes[0]['z_end']:.2f}; dish {used} at X {dish[0]:.0f} Y {dish[1]:.0f}; about {len(probes) * 1.0:.0f} min")
     if steps:
-        print(f"        + {len(steps['strokes'])} short strokes along the top edge, landed like artwork lines, Z {steps['strokes'][0]['z']:.2f} "
+        print(f"        + {len(steps['strokes'])} strokes along a free edge, landed and held like artwork lines, Z {steps['strokes'][0]['z']:.2f} "
               f"-> {steps['strokes'][-1]['z']:.2f} (they give the touch height and the width curve)")
     plan_path = plan_picture(frame, probes, dish, cal, "probe_plan.png", det, steps)
     if not yes:
@@ -1060,7 +1100,7 @@ def run_probes(machine, cfg, frame, det, yes=False, color=None, ask=True, questi
             cap.release()                                             # ... and the new lines go where the edges are still free
             cv2.imwrite(BEFORE, frame)
             probes = plan_probes_on_sheet(det["corners_mm"], guess, slot + attempt, frame=frame)
-            steps = plan_step_row(det["corners_mm"], guess, slot + attempt)
+            steps = plan_step_row(det["corners_mm"], guess, slot + attempt, frame=frame)
             code = PT.shift_gcode_xy(build_gcode(probes, dish, cfg, guess, steps), -applied[0], -applied[1])
             plan = {"probes": probes, "pf": pf, "dish": list(dish), "contact_guess": guess, "applied_offset": applied, "steps": steps}
             json.dump(plan, open(PLAN, "w"), indent=1)
@@ -1145,7 +1185,7 @@ def main(argv=None):
         probes = plan_probes_on_sheet(det["corners_mm"], contact, slot, frame=frame)
         pools = V.find_pools(frame, cal["H"], det["corners_px"])
         dish = pick_dish(pools, a.color, cfg)
-        plan_path = plan_picture(frame, probes, dish, cal, "probe_plan.png", det, plan_step_row(det["corners_mm"], contact, slot))
+        plan_path = plan_picture(frame, probes, dish, cal, "probe_plan.png", det, plan_step_row(det["corners_mm"], contact, slot, frame=frame))
         print(f"plan picture: probe_plan.png ({len(probes)} lines, dish {a.color} at X {dish[0]:.0f} Y {dish[1]:.0f}); the machine was not touched.")
         return
     try:

@@ -3946,8 +3946,11 @@ def main(argv=None):
     if cfg["line_depth"] < 0:
         raise SystemExit("--line_depth cannot be negative")
     room = cfg["z_offset"] - 0.2                          # how far below the touch height the machine can go (Z 0.2)
-    if curve is not None and cfg["line_depth"] > room > 0:
-        vprint(f"depth limited to {room:.2f} mm (machine Z 0.2) by the room below the touch height {cfg['z_offset']:.2f}  (the profile goes to {cfg['line_depth']:.1f} mm)")
+    if cfg["line_depth"] > room > 0:
+        # also without a profile: the probe measures the real touch next and sets the depth from it (apply_probe), LINE_DEPTH
+        # still the limit - stopping here on TOUCH_Z, a rough guess, refused a job the probe would have made possible (2026-11-08)
+        print(f"depth limited to {room:.2f} mm for now by the room below TOUCH_Z {cfg['z_offset']:.2f} (LINE_DEPTH {cfg['line_depth']:g}); "
+              f"the probe sets the real depth from the touch it measures")
         cfg["line_depth"] = round(room, 2)
     for key, val in (("feed_paint", a.paint_feed), ("accel_paint", a.paint_accel), ("plunge_feed", a.plunge_feed), ("wipe_feed", a.wipe_feed), ("point_step", a.point_step)):
         if val is not None:

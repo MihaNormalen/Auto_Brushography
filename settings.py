@@ -15,7 +15,7 @@ BASE_DIR = Path(__file__).resolve().parent            # files are always found n
 
 
 # =============================== 1. HEIGHTS ==========================================================
-TOUCH_Z = 4.2                # 2026-11-01: brush re-mounted, touches at Z 4 (by hand; the probe said 4.09). Was ~6.1 (2026-10-28)
+TOUCH_Z = 6.0                # 2026-11-01: brush re-mounted, touches at Z 4 (by hand; the probe said 4.09). Was ~6.1 (2026-10-28)
 #   machine Z where the brush tip touches the paper (rough). TRAINING: the ladder starts 0.5 mm above it and goes
 #   down to machine Z 0.2. PAINTING: used only when there is NO brush profile; with a profile the measured contact is used.
 
@@ -89,7 +89,7 @@ SIGN_SPUR_MM = 1.0        # signature pieces shorter than this that touch anothe
 SIGN_YEAR_MM = 6.0        # height of the year. 4 mm came out as dashes with this brush
 
 Z_OFFSET = None            # machine Z of the touch height. None = the profile's contact (or TOUCH_Z). A number overrides it.
-LINE_DEPTH = 3.0           # (2026-10-29 eve: 4.0 pressed too deep on vic; the 29.10 probe gave 2.85 mm at 3.0 vs 3.36 at 4.0, deeper only squashes the brush. Before: 4.0, brush of 28.10. probes clean to 4.0 deep / 4.5 mm; 2.8 flattened every mark over 3.3 mm) None = as deep as the profile goes (or all the room below). A number = at most this deep, mm.
+LINE_DEPTH = 6.0           # (2026-10-29 eve: 4.0 pressed too deep on vic; the 29.10 probe gave 2.85 mm at 3.0 vs 3.36 at 4.0, deeper only squashes the brush. Before: 4.0, brush of 28.10. probes clean to 4.0 deep / 4.5 mm; 2.8 flattened every mark over 3.3 mm) None = as deep as the profile goes (or all the room below). A number = at most this deep, mm.
 WIDTH_MIN = None           # only WITHOUT a profile: marks this narrow or narrower are painted at the touch height
 WIDTH_REF = None           # only without a profile: marks this wide or wider are painted at the full LINE_DEPTH
 BRUSH_WIDTH = None         # None = the thinnest line of the profile (or 1.0). Spacing of the lines in filled shapes.
@@ -191,32 +191,32 @@ PROBE_ASK = False               # True = ask before painting: "Paint the probes.
 PROBE_COUNT = 2                 # 4 = one line along each edge: touch height, width curve, brush offset AND the tilt of the paper (checked).
                                 # 2 = left + right edge only (the paper lies flattest there): the height follows a straight slope from one
                                 #     line to the other, the brush offset along the lines comes from the last probe; no cross-check
-PROBE_PAIR = ("top", "bottom")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
+PROBE_PAIR = ("left", "right")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
                                 #     sides are bent (2026-11-08, the big 411 x 277 sheet). Top / bottom as the camera picture shows them
-PROBE_LINE_MM = 140.0            # the LONGEST a probe line may be. Its real length is set so the ramp gets PROBE_BELOW_MM below the
+PROBE_LINE_MM = 100.0            # the LONGEST a probe line may be. Its real length is set so the ramp gets PROBE_BELOW_MM below the
                                  #   expected touch within what one dip paints (measured by the last probe, probe_reach.json)
 PROBE_LINE_MIN_MM = 50.0        # ... and the shortest: an edge with less free room (no paint) is not used
 PROBE_CLEAR_MM = 8.0            # new probe lines keep this far from paint already along the edge (old probe lines, any day): the
                                 #   camera finds the free stretches; no room on the PROBE_PAIR edges = the other pair is used
 PROBE_REACH_MM = 50.0           # how far one dip paints after the touch, until a probe has measured it
-PROBE_STEP_STROKES = False      # 2026-11-01: ko/15 with True looked worse to the user. (with PROBE_COUNT = 2) a row of short strokes along the TOP edge, each landed and lifted exactly like an
+PROBE_STEP_STROKES = True       # 2026-11-10: on again, rebuilt: a row of strokes landed and HELD like artwork strokes, on an edge the ramp lines do not use, a dip whenever the brush's reach is used up; their widths (second half of each stroke) give the width curve and the touch (the ramp lines then only give the tilt). The ramp alone came out 0.4-1.4 mm narrower than the artwork. (2026-11-01: the old 5 mm version on one dip looked worse.) False = curve from the ramp lines
                                 # artwork line at its own depth: the touch height and the width curve are taken from THEM (the sloping
                                 # lines only give the tilt between left and right). False = height and curve from the sloping lines
-PROBE_STEP_COUNT = 10           # how many short strokes
-PROBE_STEP_LEN_MM = 5.0         # length of each (its middle is measured, where the depth is constant)
-PROBE_STEP_GAP_MM = 3.5         # paper between two strokes (the glide out of one and into the next must not touch the other)
+PROBE_STEP_COUNT = 12           # how many strokes (a shorter free edge takes fewer)
+PROBE_STEP_LEN_MM = 12.0        # length of each: it holds its depth, its second half is measured
+PROBE_STEP_GAP_MM = 4.0         # paper between two strokes (the glide out of one and into the next must not touch the other)
 PROBE_STEP_ABOVE_MM = 0.75      # the first stroke is this far ABOVE the expected contact (should stay in the air or barely mark) ...
-PROBE_STEP_BELOW_MM = 2.75      # ... the last this far below it; the others evenly in between
+PROBE_STEP_BELOW_MM = 3.5       # ... the last this far below it; the others evenly in between
 PROBE_END_MM = 8.0              # paper left free at each end of an edge
 PROBE_MARGIN_MM = 0.25          # the paint reference = the measured touch minus this (a little deeper)
 PROBE_Z_EXTRA_MM = 0.0          # your own correction on top of the measured touch: minus = paint deeper, plus = higher
 PROBE_SAMPLE_MM = 1.0           # one point of the line (one Z step, one width measured) every this many mm
-PROBE_RETRIES = 0               # when a line already marks at its start: paint all lines again this many times, starting higher (0 = no retry)
+PROBE_RETRIES = 2               # when a line already marks at its start: paint all lines again this many times, starting higher (0 = no retry)
 PROBE_RETRY_MM = 1.0            # ... each retry starts this much higher
 PROBE_APPLY_OFFSET = True       # True = shift the job by where the probes saw the paint land (brush tip offset). False = paint where told
 PROBE_FILE = "probe_result.json"   # where the probe result is saved and read from (next to the scripts)
 PROBE_ABOVE_MM = 4.0           # (2026-11-08: 4 for the big 411 x 277 sheet, it touched above 4.55; was 2.0) a ramp starts this far ABOVE the contact you expect (in the air); the real contact varies over the paper ...
-PROBE_BELOW_MM = 4.0            # ... and ends this far below it (never below machine Z 0.3). The deepest point measured = the widest
+PROBE_BELOW_MM = 6.0            # ... and ends this far below it (never below machine Z 0.3). The deepest point measured = the widest
                                 # mark a job uses: 3.0 stopped at 2.75 mm deep / 2.88 mm wide while the line was still widening (2026-10-25)
 PAINT_COLOR = "auto"           # "black" = the whole artwork is painted in black, whatever colours the picture has (by design);
                                 # "auto" = every colour of the picture becomes a layer with its own dish. --color overrides it
