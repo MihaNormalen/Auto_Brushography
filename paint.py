@@ -358,8 +358,9 @@ def apply_probe(cfg, res, a):
     if a.max_stroke_width is None:
         cfg["thin_max"] = max(round(float(np.interp(cfg["line_depth"], curve[0], curve[1])), 2), cfg["brush_w"] * 1.1)
     tilt = None
-    if res.get("plane_spread_mm", 0.0) >= 0.05:
-        tilt = (float(res["tilt_x"]), float(res["tilt_y"]), float(res["center_mm"][0]), float(res["center_mm"][1]))
+    bend = res.get("bend") if getattr(S, "PROBE_BEND", True) else None
+    if res.get("plane_spread_mm", 0.0) >= 0.05 or bend:
+        tilt = (float(res["tilt_x"]), float(res["tilt_y"]), float(res["center_mm"][0]), float(res["center_mm"][1]), bend)
     cfg["tilt"] = tilt
     cfg["tool_offset"] = None
     if "tool_offset_mm" in res and getattr(S, "PROBE_APPLY_OFFSET", True):
@@ -383,6 +384,25 @@ def apply_probe(cfg, res, a):
     if room < curve[0][-1] - 1e-6:
         print(f"   WARNING: the deepest line is limited by the machine's Z 0.2: only {room:.1f} mm below the contact are possible, the widest "
               f"lines the brush could make ({curve[1][-1]:.2f} mm) are out of reach. A brush mounted about {curve[0][-1] - room:.1f} mm longer would give them.")
+
+
+def paper_bend_shape(bend, x, y):
+    """A bent sheet (probe.py, four lines): +1 at the top / bottom probe touches, -1 at the left / right ones, 0 at the corners.
+    The probe's bend q (mm) times this is added to the flat plane."""
+    u = ((x - bend["m1"][0]) * bend["e1"][0] + (y - bend["m1"][1]) * bend["e1"][1]) / bend["h1"]
+    v = ((x - bend["m2"][0]) * bend["e2"][0] + (y - bend["m2"][1]) * bend["e2"][1]) / bend["h2"]
+    return float(u * u - v * v)
+
+
+def paper_dz(tilt, x, y):
+    """How far the paper at (x, y) lies above / below its height at the centre: the probe's tilt plane, plus the bend if
+    it measured one (tilt = (tilt_x, tilt_y, x_centre, y_centre[, bend]) or None)."""
+    if not tilt:
+        return 0.0
+    dz = tilt[0] * (x - tilt[2]) + tilt[1] * (y - tilt[3])
+    if len(tilt) > 4 and tilt[4]:
+        dz += tilt[4]["q"] * paper_bend_shape(tilt[4], x, y)
+    return dz
 
 
 def shift_gcode_xy(code, dx, dy):
@@ -1804,9 +1824,8 @@ class Painter:
     # (2026-10-29). The straight-down / straight-up part stays LINE_LAND_HIGH_MM above the paper; the slant to the line's
     # first point (and away from its last) runs LINE_LEAD_IN_MM in line with it. The line itself keeps its own depths.
     def _air_z(self, x, y):
-        c, tilt = self.cfg, self.cfg.get("tilt")
-        tz = (tilt[0] * (x - tilt[2]) + tilt[1] * (y - tilt[3])) if tilt else 0.0
-        return c["z_paint"] + tz + float(getattr(S, "LINE_LAND_HIGH_MM", 2.0))
+        c = self.cfg
+        return c["z_paint"] + paper_dz(c.get("tilt"), x, y) + float(getattr(S, "LINE_LAND_HIGH_MM", 2.0))
 
     def _lead_point(self, at, out):
         lead = float(getattr(S, "LINE_LEAD_IN_MM", 3.0))
@@ -1876,7 +1895,7 @@ class Painter:
             tilt = c.get("tilt")
             if tilt:                                                           # the paper is not level (measured by the probes): every Z follows it
                 base = zs if zs else [z_down] * len(path)
-                zs = [z + tilt[0] * (px_ - tilt[2]) + tilt[1] * (py_ - tilt[3]) for z, (px_, py_) in zip(base, path)]
+                zs = [z + paper_dz(tilt, px_, py_) for z, (px_, py_) in zip(base, path)]
             if kind == "line":                                                 # visible in the G-code: what this stroke does with Z
                 if has_w:
                     self.gcode.append(f"; skeleton stroke: {len(path)} points, width {min(path.widths):.2f}-{max(path.widths):.2f} mm, "
@@ -3164,7 +3183,7 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
     feed_t = int(cfg.get("feed", 12000))
 
     def tilted(z, x, y):
-        return z + tilt[0] * (x - tilt[2]) + tilt[1] * (y - tilt[3]) if tilt else z
+        return z + paper_dz(tilt, x, y)
     layers_r = list(lh) if lh else list(dip_blocks)                # the colours this job painted
     # REPAIR_TAPER: each repair stroke runs on over the paint around it, inside the artwork's shape, thinning out (taper_repair_stroke)
     taper = bool(getattr(S, "REPAIR_TAPER", True))

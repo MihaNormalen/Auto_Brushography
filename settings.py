@@ -188,9 +188,11 @@ CAL_DOTS_PER_DIP = 4            # dots per dip (the brush runs dry after a few)
 PROBES = True                  # every paint.py job starts with the probes (the contact depends on paint, paper, speed, brush). False = never; --no_probe = skip once
 PROBE_ASK = False               # True = ask before painting: "Paint the probes...? [y/N]" (or, when this sheet's probe is reused,
                                 #   "Start painting now? [y/N]"). False = never ask: probes straight away, artwork after a 10 s countdown
-PROBE_COUNT = 2                 # 4 = one line along each edge: touch height, width curve, brush offset AND the tilt of the paper (checked).
+PROBE_COUNT = 4                 # (2026-11-10: 4 again, ko/84 landed 1.4 mm off in X: 2 lines never measure the offset along them) 4 = one line along each edge: touch height, width curve, brush offset AND the tilt of the paper (checked).
                                 # 2 = left + right edge only (the paper lies flattest there): the height follows a straight slope from one
                                 #     line to the other, the brush offset along the lines comes from the last probe; no cross-check
+PROBE_BEND = True               # PROBE_COUNT = 4: a BENT sheet (top / bottom higher or lower than left / right, ko/85: 1 mm) is followed,
+                                #   all four touches matched; False = a flat tilted plane only (was 0.5 mm off at every line on ko/85)
 PROBE_PAIR = ("left", "right")  # PROBE_COUNT = 2: which two opposite edges. ("left", "right") = as before; ("top", "bottom") where the
                                 #     sides are bent (2026-11-08, the big 411 x 277 sheet). Top / bottom as the camera picture shows them
 PROBE_LINE_MM = 100.0            # the LONGEST a probe line may be. Its real length is set so the ramp gets PROBE_BELOW_MM below the
@@ -199,14 +201,14 @@ PROBE_LINE_MIN_MM = 50.0        # ... and the shortest: an edge with less free r
 PROBE_CLEAR_MM = 8.0            # new probe lines keep this far from paint already along the edge (old probe lines, any day): the
                                 #   camera finds the free stretches; no room on the PROBE_PAIR edges = the other pair is used
 PROBE_REACH_MM = 50.0           # how far one dip paints after the touch, until a probe has measured it
-PROBE_STEP_STROKES = True       # 2026-11-10: on again, rebuilt: a row of strokes landed and HELD like artwork strokes, on an edge the ramp lines do not use, a dip whenever the brush's reach is used up; their widths (second half of each stroke) give the width curve and the touch (the ramp lines then only give the tilt). The ramp alone came out 0.4-1.4 mm narrower than the artwork. (2026-11-01: the old 5 mm version on one dip looked worse.) False = curve from the ramp lines
+PROBE_STEP_STROKES = False      # 2026-11-01: ko/15 with True looked worse to the user. (with PROBE_COUNT = 2) a row of short strokes along the TOP edge, each landed and lifted exactly like an
                                 # artwork line at its own depth: the touch height and the width curve are taken from THEM (the sloping
                                 # lines only give the tilt between left and right). False = height and curve from the sloping lines
-PROBE_STEP_COUNT = 12           # how many strokes (a shorter free edge takes fewer)
-PROBE_STEP_LEN_MM = 12.0        # length of each: it holds its depth, its second half is measured
-PROBE_STEP_GAP_MM = 4.0         # paper between two strokes (the glide out of one and into the next must not touch the other)
+PROBE_STEP_COUNT = 10           # how many short strokes
+PROBE_STEP_LEN_MM = 5.0         # length of each (its middle is measured, where the depth is constant)
+PROBE_STEP_GAP_MM = 3.5         # paper between two strokes (the glide out of one and into the next must not touch the other)
 PROBE_STEP_ABOVE_MM = 0.75      # the first stroke is this far ABOVE the expected contact (should stay in the air or barely mark) ...
-PROBE_STEP_BELOW_MM = 3.5       # ... the last this far below it; the others evenly in between
+PROBE_STEP_BELOW_MM = 2.75      # ... the last this far below it; the others evenly in between
 PROBE_END_MM = 8.0              # paper left free at each end of an edge
 PROBE_MARGIN_MM = 0.25          # the paint reference = the measured touch minus this (a little deeper)
 PROBE_Z_EXTRA_MM = 0.0          # your own correction on top of the measured touch: minus = paint deeper, plus = higher

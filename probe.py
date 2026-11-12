@@ -510,6 +510,11 @@ def probes_needed():
     return 4 if PROBE_COUNT >= 4 else len(PROBE_SIDES)
 
 
+def bend_shape(bend, x, y):
+    """The bend's shape (paint.py has it, the painting uses the same): +1 at the top / bottom touches, -1 at the left / right ones."""
+    return PT.paper_bend_shape(bend, x, y)
+
+
 def solve(results, probes, pf, w_ref=PROBE_CONTACT_WIDTH_MM, margin=PROBE_MARGIN_MM, steps=None):
     """Tilt of the paper from the touch points of all lines (a plane), then the width curve from every sample.
     steps (measure_steps): when the short strokes painted, THEY set the touch height (the plane is moved to where a landed stroke
@@ -541,8 +546,35 @@ def solve(results, probes, pf, w_ref=PROBE_CONTACT_WIDTH_MM, margin=PROBE_MARGIN
         res = np.zeros(len(z))
     # the contact = the MEDIAN of the lines that passed, corrected for the tilt to the centre of the paper (not the fitted intercept)
     a = float(np.median(z[use] - b * (pos[use, 0] - xc) - c * (pos[use, 1] - yc)))
-    plane = lambda x, y: a + b * (x - xc) + c * (y - yc)
     rms = float(np.sqrt((res[use] ** 2).mean()))
+    # BENT paper (2026-11-11, ko/85: top / bottom touched ~1 mm higher than left / right, the plane was 0.5 mm off at EVERY line:
+    # thin marks in the air near two edges, pressed too deep near the other two). With all four lines good, a bend term is added
+    # that is +1 at the top / bottom touches, -1 at the left / right ones and 0 at the corners; the four touches are then matched
+    # exactly. The middle of the sheet stays at the average (nothing measures it). PROBE_BEND = False = the flat plane only
+    bend = None
+    names = [p["name"] for _, p in good]
+    if (PROBE_COUNT >= 4 and bool(getattr(S, "PROBE_BEND", True)) and use.all()
+            and {"left", "right", "top", "bottom"} <= set(names)):
+        P_ = {n: pos[names.index(n)] for n in ("left", "right", "top", "bottom")}
+        m1, m2 = 0.5 * (P_["top"] + P_["bottom"]), 0.5 * (P_["left"] + P_["right"])
+        e1, e2 = P_["bottom"] - P_["top"], P_["right"] - P_["left"]
+        h1, h2 = 0.5 * float(np.linalg.norm(e1)), 0.5 * float(np.linalg.norm(e2))
+        if h1 > 20.0 and h2 > 20.0:
+            bend = {"m1": [float(v) for v in m1], "e1": [float(v) for v in e1 / (2 * h1)], "h1": h1,
+                    "m2": [float(v) for v in m2], "e2": [float(v) for v in e2 / (2 * h2)], "h2": h2, "q": 0.0}
+            s_ = np.array([bend_shape(bend, q_[0], q_[1]) for q_ in pos])
+            A4 = np.stack([np.ones(len(z)), pos[:, 0] - xc, pos[:, 1] - yc, s_], axis=1)
+            sol4, *_ = np.linalg.lstsq(A4, z, rcond=None)
+            a, b, c, bend["q"] = (float(v) for v in sol4)
+            if abs(bend["q"]) < 0.05:
+                bend = None                                              # flat enough: the plane alone
+                a = float(np.median(z - b * (pos[:, 0] - xc) - c * (pos[:, 1] - yc)))
+            else:
+                print(f"probes: the paper is BENT: {abs(bend['q']):.2f} mm {'up' if bend['q'] > 0 else 'down'} at the top / bottom lines "
+                      f"and {'down' if bend['q'] > 0 else 'up'} at the left / right ones against a flat plane (was {rms:.2f} mm RMS off): "
+                      f"every stroke's Z follows the bend")
+                rms = float(np.sqrt(((z - A4 @ sol4) ** 2).mean()))
+    plane = lambda x, y: a + b * (x - xc) + c * (y - yc) + (bend["q"] * bend_shape(bend, x, y) if bend else 0.0)
     # the width curve against depth below the TOUCH plane, from every sample above the stop
     dep, wid = [], []
     for r, p in good:
@@ -618,7 +650,7 @@ def solve(results, probes, pf, w_ref=PROBE_CONTACT_WIDTH_MM, margin=PROBE_MARGIN
     if ext_u and ext_v and w_avg > 0:
         aniso = [round(float(np.clip(ext_u / w_avg, 0.6, 1.6)), 3), round(float(np.clip(ext_v / w_avg, 0.6, 1.6)), 3)]
     return {"contact_center": a - margin, "touch_center": a, "margin_mm": margin, "aniso": aniso,
-            "tilt_x": b, "tilt_y": c, "center_mm": [xc, yc], "rms_mm": rms,
+            "tilt_x": b, "tilt_y": c, "center_mm": [xc, yc], "rms_mm": rms, "bend": bend,
             "n_probes": len(good), "n_used": int(use.sum()), "curve": [nd, nw],
             "brush": round(w_m, 1), "w_max": float(nw[-1]), "max_depth": float(nd[-1]),
             "plane_spread_mm": float(np.ptp([plane(q[0], q[1]) for q in pos])),
@@ -846,10 +878,26 @@ def check_result_fresh(res, det, max_age_h=6.0, max_move_mm=3.0, force=False):
     return False
 
 
-def lateral_offset(D, H_inv, p):
+def lateral_offset(D, H_inv, p, touch_at=None):
     """Where the mark sits ACROSS its line: the centre of the difference across the line, in mm (+ = towards the inside normal).
-    None if the mark is too faint on this line."""
+    With touch_at (mm along the line where the brush first touches): only the first PROBE_OFFSET_TIP_MM after it, where only
+    the tip paints. Deeper the brush leans / splays to one side (2026-11-10, sable5: the mark grew ~2 mm to one side), and the
+    centre of the whole mark then says nothing about where the tip lands. None if the mark is too faint on this line."""
     L = float(p["length"])
+    if touch_at is not None:
+        tip = float(getattr(S, "PROBE_OFFSET_TIP_MM", 6.0))
+        a, b = max(0.0, float(touch_at)), min(L, float(touch_at) + tip)
+        if b - a >= 2.0:
+            s_vals = np.arange(a, b + 1e-9, 0.25)
+            t_vals = np.arange(-6.0, 6.0 + 1e-9, 0.1)
+            I = _profiles(D, H_inv, p, s_vals, t_vals)
+            I = I - np.median(I[:, np.abs(t_vals) > 4.5], axis=1, keepdims=True)
+            peak = I.max(axis=1)
+            strong = peak > 15.0
+            if int(strong.sum()) >= 5:
+                w = np.clip(I[strong], 0.0, None)
+                tc = (w * t_vals[None, :]).sum(axis=1) / np.maximum(w.sum(axis=1), 1e-9)
+                return float(np.median(tc))
     s_vals = np.linspace(0.2 * L, 0.8 * L, 40)
     t_vals = np.arange(-12.0, 12.0 + 1e-9, 0.1)                     # wide: a mark 4-5 mm off its line must not reach the background band
     I = _profiles(D, H_inv, p, s_vals, t_vals)
@@ -863,14 +911,15 @@ def lateral_offset(D, H_inv, p):
     return float(np.median(tc))
 
 
-def tool_offset_from_lines(D, H_inv, probes):
+def tool_offset_from_lines(D, H_inv, probes, results=None):
     """The shift of the whole pattern, from the four lines: each line sees the shift along its own normal (t_i = shift . n_i).
     One shift is fitted to all lines (least squares; with 4 lines also a common 'all marks inward' term, which is not applied).
     The scatter is how far the lines disagree with that fit (RMS), NOT the spread of the t_i (those differ by design).
     Returns ([dx, dy] mm, scatter mm) or (None, None)."""
     vals = []
-    for p in probes:
-        t = lateral_offset(D, H_inv, p)
+    for i, p in enumerate(probes):
+        r = results[i] if results is not None and i < len(results) else {}
+        t = lateral_offset(D, H_inv, p, r.get("s_contact") if r.get("ok", True) else None)
         if t is not None:
             vals.append((t, np.array(p["normal"], float)))
     t = np.array([t for t, _ in vals])
@@ -943,7 +992,7 @@ def analyse(frame1, frame2, plan, cal, det_poly, contact_guess):
     if steps:
         print("short strokes (landed like artwork lines):  " + "  ".join(f"Z {s_['z']:.2f}:{s_['w']:.2f}mm" for s_ in steps))
     if sol is not None:
-        off, scat = tool_offset_from_lines(D, cal["H_inv"], probes)
+        off, scat = tool_offset_from_lines(D, cal["H_inv"], probes, results)
         if off is not None:
             prev = plan.get("applied_offset", [0.0, 0.0])
             off = [round(off[0] + prev[0], 3), round(off[1] + prev[1], 3)]
