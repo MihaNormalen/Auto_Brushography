@@ -241,10 +241,13 @@ def screen(frame, title, lines=(), clock=None, bottom=(), frac=None, done=False,
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def hud(frame, title, info, clock, frac, done=False, frozen=False, t=0.0):
-    """paint.py's live preview: the title, one line of progress, the clock and the progress bar."""
+def hud(frame, title, info, clock, frac, done=False, frozen=False, t=0.0, more=()):
+    """paint.py's live preview: the title, one line of progress, the clock and the progress bar. more = further lines under
+    the progress line [(text, kind)] (color_paint: the pass, the cup and the brush, the last lines of the terminal)."""
     banners = ([("*** JOB COMPLETE ***", "hot")] if done else []) + ([("!! CARRIER LOST - CAMERA PICTURE FROZEN !!", "error")] if frozen else [])
-    return screen(frame, title, [(info, "ink")], clock=clock, frac=frac, done=done, banners=banners, t=t, top_h=74)
+    more = list(more)
+    return screen(frame, title, [(info, "ink")] + more, clock=clock, frac=frac, done=done, banners=banners, t=t,
+                  top_h=74 + 24 * len(more))
 
 
 def window(h=720, w=1280):

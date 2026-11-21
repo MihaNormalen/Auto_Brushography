@@ -48,6 +48,7 @@ PLUNGE_FEED = 2000          # speed of the brush going down onto the paper, mm/m
 WIPE_FEED = 2000           # speed of the wipe move after a dip, mm/min
 FEED_TRAVEL = 12000        # travel speed, mm/min
 ACCEL_TRAVEL = 12000       # travel acceleration, mm/s2
+Z_ACCEL = None             # Z acceleration sent to the controller at the start of a job (M201 Z..), mm/s2. None = the controller's own (Lerdge: 100, which makes every cup dip and every travel with Z slow). Try 300; if Z ever skips steps (brush too high/low, hits a rim), go back to None
 
 
 # =============================== 3. THE BRUSH PROFILE ================================================
@@ -75,6 +76,8 @@ ARTWORK_WIDTH_MM = None    # None = as large as fits on the paper
 ROTATE = "auto"            # "auto" = the artwork is turned by 90 degrees when it then fits larger (landscape art on portrait paper), 0 = never, 90 = always
 H4XX0R = True             # True = every program in the h4xx0r theme (the same as --h4xx0r: paint, preview, calibrate*)
 SIGNATURE = "podpis2.png"  # painted FIRST (right after the probes), in the bottom margin under the artwork's right edge. None = no signature
+SIGN_PAINT = True          # False = the signature's room is kept (the artwork is placed the same) but it is not painted: color_paint.py
+                           # paints it only in its LAST pass, so all passes of one sheet sit in the same place
 SIGN_INSIDE = True         # True: the signature goes INSIDE the artwork's bottom right corner (no extra bottom margin: the artwork is
                            # bigger, and paints over the signature where they meet). False: in its own margin under the artwork
 SIGN_INSET_MM = 5.0        # SIGN_INSIDE: distance of the signature from the artwork's bottom and right edges
@@ -87,6 +90,130 @@ SIGN_DEPTH_MM = 0.1        # the signature is pressed this far below the touch h
                            # curve: SIGN_LINE_MM 1.6 landed 0.75 mm deep there and painted 3-4 mm blobs (2026-11-05). None = depth from SIGN_LINE_MM
 SIGN_SPUR_MM = 1.0        # signature pieces shorter than this that touch another piece (spurs at cusps and crossings) are dropped; the rest is joined into long strokes
 SIGN_YEAR_MM = 6.0        # height of the year. 4 mm came out as dashes with this brush
+
+# color_paint.py (glazes): NO fixed number of passes. Before every pass the dry sheet is photographed and the pass that brings
+# the painting nearest to the picture is chosen (which paint, where); it goes on until another pass would hardly help.
+COLOR_MAX_PASSES = 40      # at most this many passes, fill-ins not counted (one pass with its drying is about 45-70 min). 2026-11-16: 20 -> 40,
+                           # only a safety net now: the run ends when the camera sees no more progress (COLOR_STOP_PATIENCE). (2026-11-15: 12 -> 20, the run of 13:18 stopped at 12 while passes still helped 0.5-0.6)
+COLOR_MAX_COATS = 6        # at most this many coats of one paint on any spot (2026-11-13: one coat of the black took only ~10% of the light)
+COLOR_STOP_GAIN = 0.25     # (2026-11-15: 0.4 -> 0.25) the end: when the best next pass would bring the painting less than this much nearer to the picture
+                           # (colour difference dE, averaged over the whole picture; a pass that improves 10% of it by 4 = 0.4).
+                           # (the raw promise; which pass is chosen goes by the promise x what that paint really kept, COLOR_TRUST_*)
+# HONEST PROMISES (2026-11-16, run of 20:38: the detail passes promised 11.4 and did 4.1, so the end never came): after every
+# pass the camera measures what it really did; each promise is then scaled by the share its paint's recent passes kept, and
+# the choice goes by that (a paint that keeps failing loses to the others). The end: COLOR_STOP_GAIN and COLOR_STOP_PATIENCE.
+COLOR_TRUST_WINDOW = 6     # the last this many passes (of each paint, and of all) count
+COLOR_TRUST_PRIOR = 1.0    # a paint with few passes leans on all passes' share as much as this many dE of its own promises
+COLOR_TRUST_RANGE = (0.15, 1.2)  # the share stays within these
+# THE END BY THE CAMERA: when the last COLOR_STOP_PATIENCE passes (fill-ins not counted) did not make the sheet better than the
+# best it has been by COLOR_STOP_MIN_GAIN, the run ends (run of 20:38: best after pass 25, passes 26-30 only made it worse). 0 = off
+COLOR_STOP_PATIENCE = 3
+COLOR_STOP_MIN_GAIN = 0.1
+COLOR_STOP_STILL_GAIN = 0.5  # (2026-11-17) not stalled while the last pass still made the sheet this much better (dE)
+# when it IS stalled, the run does not end: the paints of those COLOR_STOP_PATIENCE passes rest and the others get their
+# turn (2026-11-17: it ended at dE 24 with the pink figure uncovered, opaque white never tried). The end = nothing else helps
+COLOR_ORDER_SLACK = 0.85     # (2026-11-17: was 0.5 in color_paint) of the passes expected to help at least this share of the
+COLOR_LIGHTNESS_WEIGHT = (2.0, 1.5, 1.0)  # (2026-11-17, Butina) per stage: the lightness difference counts this many times where
+                             # the coats are chosen and passes ranked - light and dark first, the colour after. 1 = plain dE
+COLOR_REACHABLE_DARK = True  # the picture's darkest becomes what the swatches can really reach, never darker than --dark ...
+COLOR_REACHABLE_MAX_LIFT = 10.0  # ... and at most this much lighter (L) than --dark
+COLOR_AVOID_WET = True       # (2026-11-17) a pass leaves out the LAST pass's area (still wet) when it has enough to do elsewhere:
+COLOR_WET_MARGIN_MM = -1.0   # the bare paper and older, dry parts first; < 0: a pass may reach this far into the last (wet) pass's area,
+                           # so the shapes touch (2026-11-18: +2 mm left white lines between them); > 0: keep this far away
+COLOR_RECENT_WEIGHT = (0.25, 0.6)  # spots painted in the last pass / the one before count this much when ranking passes
+COLOR_NO_WAIT = True       # (2026-11-18) a pass that touches none of the last pass's area (plus COLOR_WET_MARGIN_MM) goes on at once:
+COLOR_NO_WAIT_CHAIN = 2    # no drying, no photo, at most this many in a row; they are measured together at the next photo
+                             # best one, the preferred order picks (lighter / covering first, whites last); higher = the best one
+COLOR_LOOK_AHEAD = 2       # choosing a pass: every spot looks this many coats of each paint ahead (green = yellow AND cyan)
+# "I have about a hundred outlines, but I'll shape it up." - Seen, in Style Wars (1983)
+# BROAD FIRST, DETAIL LAST (like a brushographer): the passes go through stages. COLOR_STAGE_FROM = the first pass of each stage;
+# per stage its smoothing and its infill style. Passes 1-4: broad areas (4 mm smoothing, long bands), 5-8: 2 mm, from 9: the
+# detail (1 mm, centre-line strokes for edges and features). A single number / name instead of a tuple = the same for all.
+COLOR_STAGE_FROM = (1, 5, 9)
+COLOR_STAGE_DE = (None, 26.0, 17.0)  # (2026-11-18) ... and a stage only once the sheet is that near the picture (the best dE so far):
+                           # middle at dE 26, detail at 17 - the structure first, details only when it is there (details came at dE 21 as blobs)
+COLOR_FOCUS_WEIGHT = (0.0, 1.0, 2.0)  # (Butina) per stage: the faces (found in the picture) and strong contrasts count 1 + this when ranking
+COLOR_CRISP_EDGES = True   # (Butina) near the picture's sharp light-dark breaks a pass follows the wanted spots exactly (not the smoothed outline)
+COLOR_EDGE_DL = 8.0        # ... a break = the lightness changes by more than this per mm
+COLOR_MODULATION = 5.0     # (Butina, Cezanne's modulation) the lights this much warmer, the shadows this much cooler (Lab units at the
+                           # ends of the picture's lightness range; the paper stays white); 0 = the photo's own colours
+COLOR_TRY_UNUSED = True    # a paint not used lately (never, or not in the last COLOR_TRY_AGAIN_AFTER passes; not a white) gets a pass where it promises most, when that is at least
+COLOR_TRY_UNUSED_SHARE = 0.25  # ... this share of the best pass's promise - its own pass then shows what it really does
+COLOR_TRY_UNUSED_FROM = 3  # ... from this pass on (the first ones lay in the picture)
+COLOR_TRY_UNUSED_MAX = 6   # ... at most this many such tries in one run (2026-11-20: 2 -> 6, it keeps trying)
+COLOR_TRY_PER_PAINT = 2    # ... each paint at most this many times in one run
+COLOR_TRY_AGAIN_AFTER = 4  # ... a paint not used in this many passes counts as unused again (the sheet has changed since)
+COLOR_TRY_GAP = 2          # ... at least this many passes between two tries
+COLOR_TEST_DENSITY_SCALE = 3.0  # (2026-11-20) deciding whether to TRY a glaze known only from its test stroke: it may be this
+                           # many times as strong (optical density) - test strokes read glazes 3-6x too weak (run H: cyan never
+                           # painted). The run measures its own from the paints with a test stroke AND a pass. Its pass then counts
+COLOR_WHITE_PER_STAGE = 1  # (2026-11-20) at most this many white passes per stage (run H: 3 whites on 45% - milky, no glaze over it)
+COLOR_EYE_BLUR_PX = 0.8    # (2026-11-19) the camera photo is blurred only this much (camera px, against noise); it was 2 px + 2 grid px:
+COLOR_EYE_GRID_BLUR = 0.0  # ... ~2-3 mm, white holes unseen, black believed mid grey. This: an extra blur on the planning grid (0 = none)
+COLOR_LEARN_LANDED = True  # a pass's paint is learned where it landed (changed at least half the most), not from the gaps between strokes
+COLOR_HOLE_PASSES_MAX = 4  # bare paper where the picture is not white: at most this many hole passes in one run (the best paint for them)
+COLOR_HOLE_MIN_SHARE = 0.003  # ... when the holes are at least this share of the picture
+COLOR_HOLE_PAPER_L = 90.0  # ... a spot counts as bare paper above this L (and nearly no colour)
+COLOR_HOLE_DL = 10.0       # ... where the picture is at least this much darker than the paper (or clearly coloured)
+COLOR_HOLE_FROM_STAGE = 1  # (2026-11-20) hole passes from this stage on (0 broad, 1 middle, 2 detail), and only in the gaps INSIDE
+                           # what earlier passes painted (run H: all the bare paper at the start counted - 4 hole passes on 88%)
+COLOR_GLAZE_OVERRIDES = {}  # e.g. {"BAND_SPACING": 1.0, "PATCH_MAX_COVERED": 0.5, "VORO_OVERLAP_MM": 0.0, "BLOB_CLEAR": 0.5}: OFF -
+                           # (2026-11-20) tested on run H passes 3 and 7: painted twice 36 -> 37%, 44 -> 45% - no help; the overlap
+                           # is in the plan itself (side strokes at least one mark wide). A TRANSPARENT paint's pass would use these
+COLOR_HOLE_GROW_MM = 0.7   # ... the hole pass a little wider than the holes, so it touches what is round them
+COLOR_GLAZE_OVER_WHITE = 1.5  # a dry white's area counts this many times for a glaze (white lifts the value, the glaze over
+                           # it brings the colour back: no milky picture); 1 = no preference
+COLOR_WHITE_ONLY_LIFTS = True  # the whites only where the sheet is darker than wanted (to lift the value), never to dull a
+COLOR_WHITE_LIFT_DL = 3.0  # ... colour (run G: milky); ... at least this much darker (L)
+COLOR_MASK_SMOOTH_MM = (4.0, 2.0, 1.0)  # color_paint: each pass's area is smoothed by this much (holes closed, frayed edges rounded) so strokes can be long; 0 = off (2026-11-15: pass 5 was a lace of 128 holes -> 7 mm strokes, a maze)
+COLOR_PREFER = ("opaque", "glaze", "glaze")  # per stage: of the passes that help nearly as much, which go first - "opaque" = the covering paints (an opaque
+                           # UNDERPAINTING, glazes on top later), "glaze" = the light glazes (2026-11-16: glazes first left the figure thin and light
+                           # while the heavy opaque green went all round it)
+COLOR_INFILL_STYLE = ("bands", "bands", "skeleton")  # color_paint: the style per stage (None = INFILL_STYLE); "bands" = long parallel strokes along each area (smoothed pass 5: median 33 mm vs skeleton 17, painterly 11)
+COLOR_FILL_TRIES = 2       # FINISH A COLOUR before the next: spots of a pass that the dry photo shows unchanged get the same paint again, at most this many times (0 = off)
+COLOR_FILL_MISS = 0.3      # a spot counts as missed when it changed less than this share of what the paint should have done there
+COLOR_FILL_MIN_SHARE = 0.015  # a fill-in pass only when the missed spots are at least this share of the picture (2026-11-16: 0.004 -> 0.015, 9 fill-ins on
+                              # 0.5-3% each brought -0.14..+0.07: a whole pass and its drying for nothing)
+COLOR_FILL_MIN_GAIN = 0.15    # ... and when it is expected to bring at least this (dE, after what that paint's passes really did)
+COLOR_FILL_GAIN_ANYWAY = 0.4  # (2026-11-18) ... or, however small the missed share (white stripes between the bands), when it brings this much
+COLOR_FILL_MIN_KEPT = 0.3  # no fill-in with a paint whose pass kept less than this share of its promise (white: 18% -> 2 useless fill-ins)
+# THE PAINT CHECK: a pass that left this share of its own area unchanged (or changed the sheet almost not at all) had too little
+# paint on the brush: its cup is dipped CUP_DEEPER_STEP_MM deeper from then on (cups.json, until python cups.py refill N). 0 = off
+COLOR_DIP_FAINT = 0.25
+CUP_DEEPER_STEP_MM = 1.0
+# THE BRUSH CHECK DURING A PASS (paint.py BrushCheck): after the first dip, every COLOR_BRUSH_CHECK_EVERY-th dip and the dip after a
+# faint one, the head parks out of view and the camera looks at the first stroke after that dip. Did it change the sheet less than
+# COLOR_BRUSH_CHECK_MIN of what one coat of that paint should? Then the cup goes CUP_DEEPER_STEP_MM deeper (now, and remembered),
+# the brush dips again and paints that stroke once more. Each check costs ~10 s. 0 = off
+COLOR_BRUSH_CHECK_EVERY = 8
+COLOR_BRUSH_CHECK_MIN = 0.35
+COLOR_BRUSH_CHECK_MIN_EXP = 0.06  # (2026-11-18) only a stroke where this paint must clearly show is judged (over its own colour
+                           # nothing shows and the check said OK); the swatches of other cups are never judged
+COLOR_BRUSH_LOWER_MM = 0.2      # (2026-11-17) a faint stroke that does NOT fade along (paint on the brush, it touched too lightly):
+COLOR_BRUSH_LOWER_MAX_MM = 0.6  # the brush goes this much lower for the rest of the pass first (at most this in all); still faint
+                                # after that = too little paint -> the deeper dip (CUP_DEEPER_STEP_MM). 0 = never lower
+# TEST STROKES in a strip above the picture (the side opposite the signature): when a paint is used for the first time, its
+# first dip paints one stroke there, fat at one end and thin at the other; every stroke crosses all the others, so the camera
+# sees each paint on bare paper and over every paint before it (what it really does: t, r) and its width at each depth.
+COLOR_TEST_STRIP_MM = 36.0  # (2026-11-16: 30 -> 36 for the bands) the strip's width (0 = no test strokes, no strip). The picture gets smaller by this + the gap: use a bigger sheet
+COLOR_TEST_FAT_MM = 5.0     # (2026-11-17: 3.5 -> 5, too thin to read) a test stroke's fat end is this wide (the probe curve gives the depth), its thin end the touch height
+COLOR_TEST_GAP_MM = 6.0     # between the picture's top and the strip
+COLOR_TEST_LEN_MM = 200.0   # a stroke's length at most (it is shorter when the picture is narrower); longer = the bands lie further apart
+COLOR_TEST_RUN = 0.1       # (2026-11-17: 0.2 -> 0.1) a band runs along the strip this share of its length while it crosses it (steep: the bands lie far apart)
+COLOR_TEST_CROSS = False   # (2026-11-17) False = all bands the same way, side by side, each on its own bare paper (crossing a wet
+                           # band carried green into the yellow cup and blue into the white); True = by turns / and \, crossing
+COLOR_TEST_ALL_AT_START = True  # (2026-11-17) pass 1 paints a band of EVERY paint with a cup (a swatch, like a brushographer):
+                           # each paint measured as it is today before it is chosen (opaque magenta went on with an old value
+                           # from another mix and turned the figure pink). An extra dip and rinse each, in pass 1 only
+COLOR_TEST_HUE_MAX = 40.0  # (2026-11-17) a band whose hue is more than this many degrees off its cup's (as the camera sees it) is
+COLOR_TEST_BRIGHT_TOL = 0.15  # (2026-11-17) a band read up to this much brighter than the paper (gloss) is trimmed to paper white,
+                           # not thrown out (opaque yellow, cyan and magenta were rejected). A white's band on paper alone is never used
+                           # not used: it was read off a neighbour (the missing yellow band read as dark green)
+COLOR_TEST_LINES = 3        # each test is a BAND of this many parallel strokes from one dip (2026-11-16: one stroke was too thin to see)
+COLOR_TEST_LINE_GAP_MM = 1.2  # between the band's strokes (wider bands leave no bare paper between them in the strip)
+COLOR_TEST_EXTRA_AFTER = 2  # after this pass, paints never measured anywhere yet (not in ko/cp_measured.json) get their test stroke too (an extra dip and rinse each, no extra drying), so the choice knows them. 0 = off
+COLOR_PROBE_MAX_AGE_H = 96.0  # (2026-11-16: 48 -> 96 for runs of up to 40 passes) color_paint: the probe of pass 1 stays valid this long for the later passes (paint.py alone: 6 h)
+COLOR_LEARN_MIN_CHANGE = 0.02 # color_paint: a pass that changed the sheet less than this (median, linear) is not learned from (empty cup)
 
 Z_OFFSET = None            # machine Z of the touch height. None = the profile's contact (or TOUCH_Z). A number overrides it.
 LINE_DEPTH = 6.0           # (2026-10-29 eve: 4.0 pressed too deep on vic; the 29.10 probe gave 2.85 mm at 3.0 vs 3.36 at 4.0, deeper only squashes the brush. Before: 4.0, brush of 28.10. probes clean to 4.0 deep / 4.5 mm; 2.8 flattened every mark over 3.3 mm) None = as deep as the profile goes (or all the room below). A number = at most this deep, mm.
@@ -102,7 +229,8 @@ PLAN_WORKERS = 0           # CPU cores used for planning (0 = all, at most 8)
 DIP_MIN_MM = 70.0          # painted path before the next dip: shortest ...
 DIP_MAX_MM = 90.0        # ... and longest. Each dip picks a random distance in between. Smaller = dips more often.
 DIP_BY_WIDTH = True        # wide strokes use more paint: each painted mm counts by its width / DIP_REF_WIDTH_MM (x0.5 .. x3)
-DIP_REF_WIDTH_MM = 1.5     # at this width DIP_MIN/MAX_MM hold as they are (3 mm wide = dip after half the distance, 1 mm = 1.5x as far)
+DIP_REF_WIDTH_MM = 3.0     # at this width DIP_MIN/MAX_MM hold as they are (6 mm wide = dip after half the distance, 2 mm = 1.5x as far)
+                           # (2026-11-15: 1.5 -> 3.0, the wide glaze strokes dipped every 25-30 mm)
 LINE_ONE_STROKE = True     # a line is always painted in ONE stroke, never cut by a dip: a line that does not fit into the paint left gets its
                            # dip BEFORE it and is then painted to its end, even if longer than DIP_MAX_MM. False = cut at the dip, as before
                            # (2026-11-03: ko/24 had 20 lines cut by 36 dips, the long architecture lines)
@@ -131,6 +259,73 @@ SNAPSHOT_Y = 453.0           # the far end of Y travel: out of the picture of a 
 WATER_X = None             # optional rinse dish between colours (machine mm, radius)
 WATER_Y = None
 WATER_R = 15.0
+# --- the long rinse container (rinse.py; hardware/rinse_container.stl). The camera finds it by its black rim every job
+#     (python rinse.py detect  to check now). Or by hand:  python rinse.py calibrate  (then the hand points are used)
+RINSE_FILE = "rinse.json"  # its last known place (None = never rinse). No container seen and no file = no rinsing
+RINSE_BOX_MM = (180.0, 20.0, 29.0)   # the container outside: length, width, height (it stands on the board, like the paper)
+RINSE_WALL_MM = 2.0        # its walls and divider
+RINSE_DRY_INSIDE_MM = 30.0 # the blot compartment, inside length
+RINSE_PAPER_MM = 0.3       # the paper's thickness (the rim is RINSE_BOX_MM[2] - this above the paper)
+RINSE_SCRUB_BELOW_RIM_MM = 17.0  # the brush tip scrubs this far under the rim (+ RINSE_PRESS_MM): in the water, in your insert
+BLOT_BELOW_RIM_MM = 4.0    # the top of the blot pad, under the rim
+RINSE_END_MARGIN_MM = 15.0 # the scrub stays this far from the slot's ends (2026-11-12: 6 was too close, more room for error)
+RINSE_SEEN_BIGGER = 1.037  # the camera sees the rim this much bigger than it is (its height): measured with clean water
+                           # 2026-11-12. Fixed, because coloured water made the measured value wrong. None = measure every time
+RINSE_LOCK_MM = 5.0        # the container is fixed: a camera reading within this of its saved place keeps the saved place (dark
+                           # rinse water let the reading drift 2 mm overnight, 2026-11-13); further away = it was moved, taken over
+RINSE_CLEAR_MM = 6.0      # the brush moves to, from and over the container this far above its rim
+RINSE_KEEP_OUT_MM = 8.0    # the safety check: no other move may pass lower than the rim within this distance of the container
+RINSE_PRESS_MM = 0.0       # scrubs this much deeper than that (or than the depth recorded by hand)
+RINSE_PASSES = 2           # along the slot and back, this many times (2026-11-12: 3 was more than needed)
+RINSE_BOBS = 4             # then up and down at this many spots along the slot ...
+RINSE_BOB_MM = 4.0         # ... by this much
+RINSE_FEED = 2000          # speed in the water, mm/min
+BLOT_TIMES = 3             # presses on the blot pad
+BLOT_PRESS_MM = 1.5        # how far into the pad (below where the tip touched it)
+BLOT_STEP_MM = 3.0         # each press this much further along
+RINSE_AT_END = True        # rinse once more when the job (repairs included) is over: the brush does not dry with paint in it
+
+# --- the 12-cup palette (cups.py; hardware/palette.py): 2 holders end to end, 6 cups along, 2 across. Found by the camera
+#     every job (python cups.py detect  to check now); while it is found, its cups are the paint dishes (the old round dishes
+#     are not searched). Cups 1-6 opaque, 7-12 transparent.
+CUP_FILE = "cups.json"     # the cups' places, colours and dip counts (None = no palette: the old round dishes)
+CUP_HOLDER_MM = (140.0, 60.0)   # one holder piece, outside (hardware/palette.py HOLDER_L, HOLDER_W)
+CUP_INSIDE_MM = (39.9, 22.7)    # a cup's opening inside: along the palette, across
+CUP_RIM_MM = 27.0          # the cups' rims over the board (holder floor 2 + cup 25)
+CUP_FLOOR_MM = 3.6         # a cup's inside floor over the board (holder floor 2 + cup floor 1.6)
+CUP_CLEAR_MM = 6.0         # the brush travels this far over the rims whenever it is over the palette
+CUP_KEEP_OUT_MM = 8.0      # the safety check: no move outside a dip may pass lower than that within this distance of the palette
+CUP_OPAQUE_SIDE = "paper"  # the column nearer the paper holds OPAQUE paint ("far" = the other one)
+CUP_KIND = "any"           # which cups a job may dip into: "any", "opaque", "transparent" (paint.py --cups)
+CUP_ROW_SAME_COLOUR = True # a row holds ONE colour: opaque in front, the same colour transparent behind. A transparent cup (it looks
+                           # nearly black, deep) then takes its colour from its opaque partner, which the camera reads well
+CUP_WHITE_CUPS = (3, 9)    # cups holding WHITE paint (3 opaque, 9 transparent): white in a white cup cannot be seen, so declared here
+COLOR_MAX_MIX = 3          # color_paint: when choosing a pass, every spot tries mixes of at most this many coats still to come
+                           # (with 7 paints the mixes grow fast: 3 keeps the choice to a few seconds)
+CUP_SHIFT_MM = (0.0, 0.0)  # a correction by hand of where the camera puts every cup, mm: (along the palette, TOWARDS THE PAPER).
+                           # The brush stands too close to the frame = a positive second number (e.g. (0.0, 4.0) = 4 mm towards the paper)
+CUP_LOCK_MM = 3.0          # the palette is glued down: a camera reading within this of the saved places keeps the saved places
+CUP_EMPTY_DE = 12.0        # a cup looking at least this different (Lab) from the picture of the empty cups holds paint
+CUP_DIP_START_MM = 3.0    # the first dip in a cup goes this far over its floor ...
+CUP_DIP_STEP_MM = 0.05     # ... every later dip this much lower (the paint level sinks as it is used; counted per cup, also over
+                           # jobs: python cups.py refill  after filling up) ...
+CUP_DIP_END_MM = 0.5       # ... but never lower than this over the floor (keep at least this much paint in the cups)
+COLOR_REFILL_AT_START = True  # color_paint: a new run (pass 1) counts every cup as filled up: dips start again at CUP_DIP_START_MM, the paint
+                              # check's deeper dips are forgotten (python cups.py refill N still does it by hand, e.g. in a drying pause)
+CUP_DIP_FEED = 3000        # speed going down into the paint, mm/min (no splashing, the bristles fill; 2026-11-14: 600 was slow)
+CUP_STIR_MM = 4.0          # the small stir in the paint (radius)
+CUP_STIR_LOOPS = 1
+CUP_STIR_FEED = 3000       # speed of the stir in the paint, mm/min (2026-11-15: 1500 -> 3000, faster dips)
+CUP_JITTER_SHARE = 0.6     # the dip point wanders this share of the room left in the cup, so one spot is not used up
+CUP_WIPE_BELOW_RIM_MM = 4.5   # (2026-11-15 evening: 0.5 -> 2.5, the user: wipe a few mm lower, then lift and go. Watch for dry strokes) (2026-11-15: 1.5 -> 0.5, it scraped too much paint off: 13 mm per dip) the wipe: the tip this far under the rim, drawn across it on the side facing the paper
+# removing the drops when the brush leaves a cup (as remove_drops in the earlier painters, D2Woptimized.py):
+CUP_SOAK_MS = 0            # a pause in the paint after the stir (ms), so the bristles take up paint
+CUP_DRIP_RISE_MM = 6.0     # out of the paint slowly, first this far up over the dip depth ...
+CUP_LIFT_FEED = 1500       # ... at this speed (mm/min): the drops run back into the cup. Also the lift after the wipe (was 400)
+CUP_DRIP_MS = 150          # a pause inside the cup, over the paint, before the wipe: drops fall back in (was 800)
+CUP_WIPE_FEED = 2000       # the wipe across the rim, not fast (fast flings the drops off; was 600)
+CUP_WIPE_SPREAD_MM = 6.0   # the wipe point wanders this far along the wall, so the rim is not always wiped at one spot
+CUP_WIPE_ACCEL = 1500      # (was 300) acceleration (mm/s2) from leaving the paint until over the rim: gentle (copicograf.py remove_drops acc)
 
 
 # =============================== 6. THE WATER DISH (training) AND THE FALLBACK DISH ==================
@@ -212,6 +407,8 @@ PROBE_STEP_BELOW_MM = 2.75      # ... the last this far below it; the others eve
 PROBE_END_MM = 8.0              # paper left free at each end of an edge
 PROBE_MARGIN_MM = 0.25          # the paint reference = the measured touch minus this (a little deeper)
 PROBE_Z_EXTRA_MM = 0.0          # your own correction on top of the measured touch: minus = paint deeper, plus = higher
+ZNUDGE_MAX_DOWN_MM = 3.0        # (2026-11-18; 2026-11-20 1.0 -> 3.0, the user needed more) python znudge.py down 0.2 / up 0.1 / 0: your correction WHILE a job runs (z_nudge.json,
+ZNUDGE_MAX_UP_MM = 1.5          # read every 2 s, the strokes on the paper only); never more than this deeper / higher
 PROBE_SAMPLE_MM = 1.0           # one point of the line (one Z step, one width measured) every this many mm
 PROBE_RETRIES = 2               # when a line already marks at its start: paint all lines again this many times, starting higher (0 = no retry)
 PROBE_RETRY_MM = 1.0            # ... each retry starts this much higher
@@ -269,6 +466,14 @@ TIMELAPSE_MIN_CHANGE = 0.4     # frames that hardly differ from the last one (dr
 PHOTO_EVERY_DIPS = 0           # 0 = no photo every few dips (start and final photos still taken)
 REPAIR_AT_END = True      # repair the white spots after drying (False = the job ends with the final photo)
 DRY_WAIT_MIN = 1         # wait before every photo that gets judged or repaired
+DRY_EXTEND_MIN = 5.0     # the drying countdown between colour passes: + (or P) adds this many minutes, - takes them off, Enter goes on now
+COLOR_DRY_MIN = 25.0     # color_paint: minutes of drying between passes (python color_paint.py ... --dry N for one run). 2026-11-16: humid days
+COLOR_DRY_CHECK_MIN = 3.0  # ... then THE CAMERA CHECKS IT IS DRY: a photo this long before the end and one at the end; while the last pass's area
+                         # still changes (wet paint dries lighter or darker), it waits this long again. 0 = no check
+COLOR_DRY_STILL = 0.002  # ... dry = its area changed less than this more than the rest of the sheet (linear light, medians). Run of 20:38:
+                         # the whole wet -> dry change was 0.007-0.027, the camera's noise ~0.0045 (a guess for 3 min, watch it)
+COLOR_DRY_CHECK_MAX = 6  # ... at most this many extra waits
+COLOR_DRY_VIEW = True    # color_paint: a camera window while the sheet dries (countdown, the last pass seen | target | pass; + - Enter work there too)
 
 # blob style (INFILL_STYLE = "cells")
 BLOB_MIN_MM = 6.0          # shortest blob kept, mm. Raise for longer strokes, lower for more dots
@@ -319,6 +524,9 @@ VORO_CALLIGRAPHY = True      # thin entry, swells to full width at 40 % of the l
 VORO_MARK_SHARE = 0.7        # share of the planned width the brush REALLY paints (run of 2026-10-25: ~0.7)
 VORO_CELL_WIDTH = 0.7        # cell width as a share of what one blob really paints at its widest (below 1 = neighbouring swells overlap)
 VORO_OVERLAP_MM = 0.3        # how far a blob reaches past its own cell into its neighbours (never past the outline)
+BAND_SPACING = 0.9           # "bands" infill: the bands are this share of the widest mark apart (below 1 = they overlap a little)
+PATCH_MAX_COVERED = None     # a planned repair stroke (the plan's own gaps) is left out when the other strokes paint this share of
+                             # it already (0.5); None = all kept. COLOR_GLAZE_OVERRIDES sets it for glazes
 VORO_RELAX = 3               # smoothing steps for the cells (0 = raw, more = more even cells)
 VORO_FIELD_SIGMA_MM = 5.0    # how smoothly the stroke direction follows the shape (smaller = follows every bend)
 VORO_AXIS_WEIGHT = 0.3       # pull towards each piece's long axis (0 = follow the outline only)

@@ -100,6 +100,22 @@ def pick_dish(pools, color, cfg):
     return p["center_mm"][0], p["center_mm"][1], p["radius_mm"]
 
 
+def pick_cup(cs, color):
+    """The cup of the 12-cup palette to paint the dots with: the darkest filled cup ("auto": dots show best dark), or the filled
+    cup nearest to the colour asked for. Returns (x, y, radius) like pick_dish, or None."""
+    filled = [c for c in cs["cups"] if c.get("filled")]
+    if not filled:
+        return None
+    if color == "auto" or color == "black":
+        c = min(filled, key=lambda c: c.get("val", 255))
+    else:
+        same = [c for c in filled if PT.hue_name(c.get("hue", 0)) == color]
+        c = min(same or filled, key=lambda c: c.get("val", 255))
+    print(f"dots painted from cup {c['n']} ({c['kind']}, hue {c.get('hue', 0):.0f}, value {c.get('val', 0):.0f}) at "
+          f"X {c['xy'][0]:.0f} Y {c['xy'][1]:.0f}")
+    return c["xy"][0], c["xy"][1], 11.0
+
+
 def build_gcode(dots, dish, cfg, per_dip, press, dwell_ms):
     """The painter's own dip (spiral, wipe) + a vertical press for every dot. Returns the G-code lines."""
     P = PT.Painter(cfg)
@@ -150,11 +166,31 @@ def match_dots(blobs, dots_mm, cal0, spacing):
     tol = min(0.4 * spacing, 18.0)
     px = np.array([[b["x"], b["y"]] for b in blobs]).reshape(-1, 2)
     est = V.px_to_mm_array(cal0["H"], px) if len(px) else np.zeros((0, 2))
+    # the whole grid can be shifted when the machine was moved (its end stops, 2026-11-14: 20 mm): the ONE shift that puts the
+    # most planned dots onto a mark (within 4 mm) is found first, and the dots are matched around it
+    shift = np.zeros(2)
+    if len(est):
+        D = np.asarray(dots_mm, float)
+        best = (0, np.zeros(2))
+        for v in (est[None, :, :] - D[:, None, :]).reshape(-1, 2):
+            if np.linalg.norm(v) > 0.9 * spacing * 1.5:
+                continue
+            hits = int((np.linalg.norm(est[None, :, :] - (D + v)[:, None, :], axis=2).min(axis=1) < 4.0).sum())
+            if hits > best[0] or (hits == best[0] and np.linalg.norm(v) < np.linalg.norm(best[1])):
+                best = (hits, v)
+        if best[0] >= max(3, len(D) // 3):
+            refine = np.linalg.norm(est[None, :, :] - (D + best[1])[:, None, :], axis=2)
+            near = refine.argmin(axis=1)
+            ok = refine[np.arange(len(D)), near] < 4.0
+            shift = np.median(est[near[ok]] - D[ok], axis=0)
+        if np.linalg.norm(shift) > 3.0:
+            print(f"the marks sit ({shift[0]:+.1f}, {shift[1]:+.1f}) mm from where the old calibration expected them "
+                  f"(the machine or the camera was moved): matched around that shift")
     pairs, used = [], set()
     for k, (x, y) in enumerate(dots_mm):
         if len(est) == 0:
             break
-        d = np.linalg.norm(est - np.array([x, y]), axis=1)
+        d = np.linalg.norm(est - (np.array([x, y]) + shift), axis=1)
         for j in np.argsort(d):
             if d[j] > tol:
                 break
@@ -238,11 +274,20 @@ def _solve_with(P_raw, M, lens):
 
 
 # ------------------------------------------------------------------------------------------------ pictures and saving
-def plan_picture(frame, det, dish, dots, cal0, path):
+def plan_picture(frame, det, dish, dots, cal0, path, cups=None):
     out = frame.copy()
     cv2.polylines(out, [np.array(det["corners_px"], np.int32)], True, (0, 255, 0), 3, cv2.LINE_AA)
     c = V.mm_to_px_array(cal0["H_inv"], [(dish[0], dish[1])])[0]
-    cv2.circle(out, (int(c[0]), int(c[1])), max(6, int(dish[2] * 2.9)), (255, 128, 0), 3, cv2.LINE_AA)
+    if cups is not None:                                          # the cup it dips into, drawn as the cup (a box), at rim height
+        import cups as CUPS
+        lay = CUPS.layout(); u, vp = np.array(cups["u"]), np.array(cups["to_paper"])
+        N = np.array(V.pixel_to_mm(cal0["H"], frame.shape[1] / 2.0, frame.shape[0] / 2.0))
+        k = CUPS.seen_bigger(float(getattr(S, "CUP_RIM_MM", 27.0)))
+        ctr = np.array(dish[:2]); a_, b_ = lay["inside"][0] / 2, lay["inside"][1] / 2
+        q = [N + (ctr + su * a_ * u + sv * b_ * vp - N) * k for su, sv in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+        cv2.polylines(out, [V.mm_to_px_array(cal0["H_inv"], q).astype(np.int32)], True, (255, 128, 0), 3, cv2.LINE_AA)
+    else:
+        cv2.circle(out, (int(c[0]), int(c[1])), max(6, int(dish[2] * 2.9)), (255, 128, 0), 3, cv2.LINE_AA)
     for k, p in enumerate(V.mm_to_px_array(cal0["H_inv"], dots), 1):
         x, y = int(round(p[0])), int(round(p[1]))
         cv2.drawMarker(out, (x, y), (0, 0, 255), cv2.MARKER_CROSS, 18, 2)
@@ -362,8 +407,22 @@ def main(argv=None):
     ux = sorted({round(p[0], 3) for p in dots})
     uy = sorted({round(p[1], 3) for p in dots})
     spacing = min(np.diff(ux).min() if len(ux) > 1 else 1e9, np.diff(uy).min() if len(uy) > 1 else 1e9)
-    pools = V.find_pools(frame1, H, det["corners_px"])
-    dish = pick_dish(pools, a.color, cfg)
+    dish = None
+    if getattr(S, "CUP_FILE", "cups.json") is not None:            # the 12-cup palette: its cups are the dishes
+        import cups as CUPS
+        cfg["cups"] = CUPS.choose(frame1, H, H_inv, det["corners_px"])
+        if not cfg["cups"]:
+            raise SystemExit("the 12-cup palette was not found (is the toolhead out of the camera picture? cups_detect.png). "
+                             "No dip without it: the old round dishes travel too low for the cups. Without a palette set "
+                             "CUP_FILE = None in settings.py.")
+        if cfg["cups"]:
+            dish = CUPS.pick(cfg["cups"], a.color)
+            if dish is None:
+                raise SystemExit("the palette is there, but every cup looks EMPTY: put dark paint in one cup "
+                                 "(check cups_detect.png)")
+    if dish is None:
+        pools = V.find_pools(frame1, H, det["corners_px"])
+        dish = pick_dish(pools, a.color, cfg)
     code = "\n".join(build_gcode(dots, dish, cfg, CAL_DOTS_PER_DIP, CAL_DOT_PRESS_MM, S.DOT_DWELL_MS))
     z_dot = max(0.3, cfg["z_paint"] - CAL_DOT_PRESS_MM)
     print(f"paper {det['size_mm'][0]:.0f} x {det['size_mm'][1]:.0f} mm; {len(dots)} dots in X {rect[0]:.0f}..{rect[1]:.0f}, Y {rect[2]:.0f}..{rect[3]:.0f} "
@@ -371,8 +430,9 @@ def main(argv=None):
     print(f"dots are pressed at machine Z {z_dot:.2f} (contact {contact:.2f} - {CAL_DOT_PRESS_MM:g} mm); a dip every {CAL_DOTS_PER_DIP} dots")
     plan = {"dots_mm": [list(d) for d in dots], "spacing_mm": float(spacing), "paper_px": det["corners_px"], "dish": list(dish), "contact": contact}
     json.dump(plan, open(PLAN, "w"), indent=1)
-    plan_picture(frame1, det, dish, dots, cal0, "calib_dots_plan.png")
-    print("plan picture: calib_dots_plan.png (green = paper, blue circle = dish, red crosses = the dots)")
+    plan_picture(frame1, det, dish, dots, cal0, "calib_dots_plan.png", cups=cfg.get("cups"))
+    print("plan picture: calib_dots_plan.png (green = paper, blue " + ("box = the cup" if cfg.get("cups") else "circle = dish")
+          + ", red crosses = the dots)")
     if not a.no_preview:
         PT.show_picture("calib_dots_plan.png")
     if a.plan_only:
@@ -382,6 +442,20 @@ def main(argv=None):
         print("not started. The machine stays homed.")
         return
     cfg["z_high"] = max(cfg["z_high"], cfg["z_low"] + 1.0)
+    if cfg.get("cups"):
+        import cups as CUPS
+        bad = CUPS.warn_moves(code, cfg["cups"], cfg["z_paint"], "the dots")
+        if bad:
+            raise SystemExit("not started: a move would pass low over the palette")
+        h = CUPS.heights(cfg["z_paint"])
+        machine.send_line(f"G0 Z{h['safe']:.3f} F1500")
+        machine.send_line(f"G0 X{dish[0]:.3f} Y{dish[1]:.3f} F6000")
+        machine.send_line("M400", timeout=120)
+        print()
+        if not a.yes and input(f"the brush is over the cup, {h['safe'] - h['rim']:.0f} mm over the rims (the old calibration found it). "
+                               f"Over the MIDDLE of the cup?  Enter = paint the dots, n = stop ").strip().lower() == "n":
+            print("not started. Tell where the brush stands off the cup's middle (mm, which way).")
+            return
     if not PT.stream_gcode(machine, code, cfg):
         raise SystemExit("painting was stopped: no calibration was made.")
     PT.go_to_snapshot(machine, cfg)

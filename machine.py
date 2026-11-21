@@ -91,7 +91,7 @@ class LerdgeSerial:
     def query(self, cmd, timeout=None):
         return self.send_line(cmd, True, timeout or self.timeout)
 
-    def lift_to_safe(self):     self.send_line(f"G0 Z{HOME_LIFT_Z:.3f} F3000")      # high: the next step is homing X and Y
+    def lift_to_safe(self):     self.send_line(f"G0 Z{max(HOME_LIFT_Z, safe_z()):.3f} F3000")   # over every container: next X and Y home
     def flush_motion(self):     self.send_line("M400", timeout=120)
     def wait_motion_complete(self): self.flush_motion(); return True
     def send_stroke(self, lines):
@@ -106,6 +106,24 @@ class LerdgeSerial:
 
     def set_absolute(self): self.send_line("G90")
     def set_units_mm(self): self.send_line("G21")
+
+
+def clear_all_mm():
+    """How far over the PAPER the brush must be to pass over every container on the board (the cups' rims and the rinse
+    container's, each with its clearance): every sideways move away from the paper happens at least this high."""
+    import settings as S
+    hs = []
+    if getattr(S, "CUP_FILE", "cups.json") is not None:
+        hs.append(float(getattr(S, "CUP_RIM_MM", 27.0)) + float(getattr(S, "CUP_CLEAR_MM", 6.0)))
+    if getattr(S, "RINSE_FILE", "rinse.json") is not None:
+        hs.append(float(getattr(S, "RINSE_BOX_MM", (180.0, 20.0, 29.0))[2]) + float(getattr(S, "RINSE_CLEAR_MM", 6.0)))
+    return max(hs) - float(getattr(S, "RINSE_PAPER_MM", 0.3)) if hs else 0.0
+
+
+def safe_z(touch=None):
+    """Machine Z over every container, for a brush touching the paper at `touch` (TOUCH_Z when not known yet)."""
+    import settings as S
+    return float(S.TOUCH_Z if touch is None else touch) + clear_all_mm()
 
 
 def open_machine(home=True, quiet=True):

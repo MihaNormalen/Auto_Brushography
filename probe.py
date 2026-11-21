@@ -788,7 +788,9 @@ def result_problems(res, det, max_age_h=6.0, max_move_mm=3.0):
             problems.append(f"the paper is {move:.0f} mm from where the probes were measured (limit {max_move_mm:.0f} mm)")
     w0 = touch_width_problem(res)
     if w0:
-        problems.append(w0)
+        # a doubt about the measurement, not about the sheet: a fresh probe only WARNS about it, so a reused one does too
+        # (it refused the probe of pass 1 for pass 2 of the same sheet, 2026-11-13)
+        print(f"   probe result: {w0} (a warning, as when it was measured)")
     return problems
 
 
@@ -814,7 +816,10 @@ def marks_visible(frame, res):
     if frame is None or not lines:
         return None
     cal = V.load_calibration()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    # the DARKEST channel, not grey: a transparent colour (cyan probe lines) is barely darker in grey but clearly darker in its
+    # own absorbing channel (cyan in red, magenta in green). With grey and 0.6 the 22:00 probes on a colour chart were 'not
+    # there', and pass 2 painted new ones over them (2026-11-12)
+    gray = frame.min(axis=2)
     h, w = gray.shape
     seen = 0
     for ln in lines:
@@ -830,9 +835,11 @@ def marks_visible(frame, res):
             if not ok.any():
                 continue
             g = gray[px[ok, 1], px[ok, 0]].astype(float)
+            if float(np.max(g)) < 140:                                  # no bright paper beside it here (wood, shadow): not counted
+                continue
             vals.append(float(np.max(g)))
-            dark += float(np.min(g)) < 0.6 * float(np.max(g))           # paint well darker than the paper beside it
-        if vals and dark >= 0.5 * len(ss):
+            dark += float(np.min(g)) < 0.85 * float(np.max(g))          # paint darker than the paper beside it (blank paper: 0.95+)
+        if len(vals) >= 0.5 * len(ss) and dark >= 0.5 * len(vals):
             seen += 1
     return seen >= max(1, len(lines) // 2)
 
@@ -870,6 +877,14 @@ def check_result_fresh(res, det, max_age_h=6.0, max_move_mm=3.0, force=False):
     problems = result_problems(res, det, max_age_h, max_move_mm)
     if not problems:
         return True
+    old = res.get("paper_corners_mm")
+    if force and old and det:
+        move = max(np.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(old, det["corners_mm"]))
+        if move > 20.0:                                              # not "a little off": another sheet, or the paper was not found
+            raise SystemExit(f"STOPPED: the paper found now is {move:.0f} mm from where the probes were measured - even with "
+                             f"--force_probe_file this is not the same sheet, or the paper was not found correctly (look at "
+                             f"paper_frame.png). Nothing was painted. (2026-11-13: a painted sheet was found 154 mm off and "
+                             f"three passes were painted 37 mm small)")
     msg = "this probe result does not fit this sheet: " + "; ".join(problems) + \
           ". Run  python probe.py  on this sheet (each sheet gets one set of probes)."
     if not force:
@@ -957,6 +972,11 @@ def applied_offset_from_last_result():
         if os.path.isfile(PROBE_FILE):
             r = json.load(open(PROBE_FILE))
             o = r.get("tool_offset_mm")
+            import settings as _S
+            cal = getattr(_S, "CALIBRATION_FILE", None)
+            if cal and os.path.isfile(cal) and os.path.getmtime(cal) > os.path.getmtime(PROBE_FILE):
+                print("probe: the calibration is newer than the last probe result: its tip offset is not applied (0, 0)")
+                return [0.0, 0.0]
             if o and offset_usable(o, r.get("tool_offset_scatter_mm")):
                 return [float(o[0]), float(o[1])]
     except Exception:
@@ -1042,6 +1062,15 @@ def pick_dish(pools, color, cfg):
     ok = [p for p in pools if p["roundness"] >= cfg["min_roundness"] and p["area_mm2"] >= cfg["min_pool_area"] and near(p)]
     if color == "black":                                         # black: the dark pool (vision.find_pools marks it)
         cands = sorted([p for p in ok if p.get("dark")], key=lambda p: -p["area_mm2"])
+    elif color == "auto":                                        # the DARKEST paint in a proper dish (dark blue, brown, black ...)
+        cands = sorted(ok, key=lambda p: float(np.mean(p.get("bgr", (255, 255, 255)))))
+    elif color in PT.COLOR_HUES:
+        # the pool nearest in hue to the colour, like the painting matches its dishes (paint.assign_dishes): a dark blue at hue 102
+        # is closer to the CYAN family centre than to blue's, so asking for the family name refused it (2026-11-12). Within 22
+        # hue steps; a dark pool never counts as a colour
+        centre = {n: np.mean([0.5 * (lo + hi) for lo, hi in r]) if n != "red" else 0.0 for n, r in PT.COLOR_HUES.items()}[color]
+        cands = [p for p in ok if not p.get("dark") and V.hue_distance(p["hue"], centre) <= 22.0]
+        cands.sort(key=lambda p: (V.hue_distance(p["hue"], centre) + 0.1 * abs(200.0 - p.get("sat", 200.0))))
     else:
         # the coloured pool NEAREST in colour to the named colour (not "its hue is in the blue range": a lilac at 128 passed as
         # blue and the probes were painted lilac); a dark pool never counts as a colour
@@ -1093,16 +1122,29 @@ def run_probes(machine, cfg, frame, det, yes=False, color=None, ask=True, questi
     cal = V.load_calibration()
     pf = cfg.get("paper_frame") or V.paper_frame(det, cal["H"])
     guess = contact_guess_from(cfg)
-    pools = V.find_pools(frame, cal["H"], det["corners_px"])
     used = color or PROBE_COLOR
-    try:
-        dish = pick_dish(pools, used, cfg)
-    except SystemExit:
-        if used == PROBE_COLOR:
-            raise
-        print(f"probes: no {used} paint dish with paint in it; probing with {PROBE_COLOR} instead (PROBE_COLOR in settings.py)")
-        used = PROBE_COLOR
-        dish = pick_dish(pools, used, cfg)
+    dish = None
+    import settings as _S0
+    if getattr(_S0, "CUP_FILE", "cups.json") is not None:            # the 12-cup palette: its cups are the dishes
+        import cups as CUPS
+        if not cfg.get("cups"):
+            cfg["cups"] = CUPS.choose(frame, cal["H"], cal["H_inv"], det["corners_px"])
+        if not cfg.get("cups"):
+            raise SystemExit("PROBE STOPPED: the 12-cup palette was not found (is the toolhead out of the camera picture? "
+                             "cups_detect.png). Without a palette set CUP_FILE = None in settings.py.")
+        dish = CUPS.pick(cfg["cups"], used)
+        if dish is None:
+            raise SystemExit("PROBE STOPPED: every cup looks EMPTY (cups_detect.png)")
+    if dish is None:
+        pools = V.find_pools(frame, cal["H"], det["corners_px"])
+        try:
+            dish = pick_dish(pools, used, cfg)
+        except SystemExit:
+            if used == PROBE_COLOR:
+                raise
+            print(f"probes: no {used} paint dish with paint in it; probing with {PROBE_COLOR} instead (PROBE_COLOR in settings.py)")
+            used = PROBE_COLOR
+            dish = pick_dish(pools, used, cfg)
     slot = max(sheet_probe_count(det), 1 if reusable_result(det, frame) else 0)
     if slot:
         print(f"this sheet already has {slot} set(s) of probe lines: the new lines go where the edges are still free")

@@ -28,3 +28,8 @@ strokes_*/
 .idea/
 Thumbs.db
 desktop.ini
+
+# private pictures (the artist's works) and local state
+gozd/
+demo/
+z_nudge.json

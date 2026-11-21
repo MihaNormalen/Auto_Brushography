@@ -531,16 +531,19 @@ def paper_frame(det, H):
             "paper_w": float(a_right - a_left), "paper_h": float(b_top - b_bot)}
 
 
-def fit_artwork(pf, art_w_px, art_h_px, margin_mm=10.0, rotate="auto", width_mm=None, bottom_mm=None):
+def fit_artwork(pf, art_w_px, art_h_px, margin_mm=10.0, rotate="auto", width_mm=None, bottom_mm=None, top_mm=None):
     """Largest placement of the artwork inside the paper (margin all round), centred. rotate: 'auto' | 0 | 90.
     width_mm: force the artwork width (after rotation) instead of 'as large as fits'.
     bottom_mm: a wider margin under the picture's own bottom (room for the signature); the artwork is centred in what is
-    left. Turned by 90 degrees (counter-clockwise), the picture's bottom is the paper's right side."""
+    left. Turned by 90 degrees (counter-clockwise), the picture's bottom is the paper's right side.
+    top_mm: room added over the picture's own top (color_paint's strip of test strokes), on top of the margin; turned, the
+    picture's top is the paper's left side."""
     bottom = max(margin_mm, bottom_mm or 0.0)
+    top = margin_mm + float(top_mm or 0.0)
 
-    def room(rot):                                                   # (avail_w, avail_h, right margin, bottom margin)
-        right, bot = (bottom, margin_mm) if rot == 90 else (margin_mm, bottom)
-        return pf["paper_w"] - margin_mm - right, pf["paper_h"] - margin_mm - bot, right, bot
+    def room(rot):                                                   # (avail_w, avail_h, left margin, bottom margin)
+        left, right, bot, tp = (top, bottom, margin_mm, margin_mm) if rot == 90 else (margin_mm, margin_mm, bottom, top)
+        return pf["paper_w"] - left - right, pf["paper_h"] - tp - bot, left, bot
     if min(room(0)[:2] + room(90)[:2]) <= 5:
         raise ValueError(f"paper too small for a {margin_mm:.0f} mm margin: {pf['paper_w']:.0f} x {pf['paper_h']:.0f} mm")
     opts = {}
@@ -549,12 +552,12 @@ def fit_artwork(pf, art_w_px, art_h_px, margin_mm=10.0, rotate="auto", width_mm=
         opts[rot] = (min(aw / w, ah / h), w, h)
     rot = (0 if opts[0][0] >= opts[90][0] else 90) if rotate == "auto" else int(rotate)
     scale, w, h = opts[rot]
-    avail_w, avail_h, _, bottom = room(rot)
+    avail_w, avail_h, left, bottom = room(rot)
     if width_mm:
         scale = width_mm / w
     art_w, art_h = w * scale, h * scale
     fits = art_w <= avail_w + 1e-6 and art_h <= avail_h + 1e-6
-    a0 = pf["a_left"] + margin_mm + (avail_w - art_w) / 2.0
+    a0 = pf["a_left"] + left + (avail_w - art_w) / 2.0
     b0 = pf["b_bot"] + bottom + (avail_h - art_h) / 2.0
     c, u, v = np.array(pf["origin_mm"]), np.array(pf["u"]), np.array(pf["v"])
     return {"origin_mm": (c + a0 * u + b0 * v).tolist(), "u": pf["u"], "v": pf["v"], "width_mm": float(art_w),
@@ -570,7 +573,8 @@ def placement_corners_mm(pl):
 
 def save_paper(det, pf, path=PAPER_FILE):
     d = {k: v for k, v in det.items() if k != "mask"}
-    json.dump({"detected": d, "frame": pf}, open(path, "w"), indent=2)
+    json.dump({"detected": d, "frame": pf}, open(path, "w"), indent=2,
+              default=lambda o: o.tolist() if hasattr(o, "tolist") else float(o))   # numpy values in the detection
 
 
 def load_paper(path=PAPER_FILE):
@@ -745,4 +749,49 @@ def find_pools(frame, H, exclude_poly_px=None, exclude_mm=15.0, min_area_mm2=100
                     "area_mm2": area_mm2, "bgr": [int(v) for v in np.median(frame[m], axis=0)],
                     "hue": circular_mean_hue(hh[m]), "sat": float(np.median(ss[m])), "dark": True,
                     "roundness": _roundness(filled)})
+    # a glossy dark paint (a transparent black) reflects the light in a wide bright ring: the dark pixels above fall apart into
+    # pieces and the dish is lost (2026-11-12). So the DISHES are also found by their round rims, and a dish whose inside is dark
+    # (the reflections left out) is a dark pool as a whole; the pieces inside it are dropped
+    for dd in _dark_dishes(frame, hsv, ppm, H, exclude_poly_px, int(getattr(_S2, "POOL_DARK_V", 70))):
+        out = [p for p in out if not (p.get("dark") and math.hypot(p["center_px"][0] - dd["center_px"][0],
+                                                                   p["center_px"][1] - dd["center_px"][1]) < dd["r_px"])]
+        dd.pop("r_px")
+        out.append(dd)
     return sorted(out, key=lambda d: -d["area_mm2"])
+
+
+def _dark_dishes(frame, hsv, ppm, H, exclude_poly_px, dark_v):
+    """Round dishes (found by their rims, radius POOL_DISH_R_MM) whose inside, without the glare, is darker than dark_v and
+    nearly colourless: dark pools, whole."""
+    import settings as _S3
+    r_lo, r_hi = getattr(_S3, "POOL_DISH_R_MM", (17.0, 30.0))
+    g = cv2.medianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), 5)
+    cs = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1.2, minDist=int(1.3 * r_lo * ppm), param1=120, param2=40,
+                          minRadius=int(r_lo * ppm), maxRadius=int(r_hi * ppm))
+    out = []
+    if cs is None:
+        return out
+    paper = None
+    if exclude_poly_px is not None:
+        paper = np.zeros(g.shape, np.uint8)
+        cv2.fillPoly(paper, [np.asarray(exclude_poly_px, np.int32)], 1)
+    for x, y, r in cs[0]:
+        if paper is not None and paper[min(max(int(y), 0), g.shape[0] - 1), min(max(int(x), 0), g.shape[1] - 1)]:
+            continue
+        ri = 0.8 * r                                             # inside the rim
+        m = np.zeros(g.shape, np.uint8)
+        cv2.circle(m, (int(x), int(y)), int(ri), 1, -1)
+        sel = m > 0
+        v, s = hsv[..., 2][sel], hsv[..., 1][sel]
+        keep = v < 170                                           # the glare left out
+        if keep.mean() < 0.4:
+            continue
+        if np.median(v[keep]) >= dark_v or np.median(s[keep]) >= 120:
+            continue
+        mx, my = pixel_to_mm(H, float(x), float(y))
+        r_mm = ri / ppm
+        px = frame[sel][keep]
+        out.append({"center_px": (float(x), float(y)), "center_mm": (mx, my), "radius_mm": r_mm, "area_mm2": math.pi * r_mm * r_mm,
+                    "bgr": [int(c) for c in np.median(px, axis=0)], "hue": circular_mean_hue(hsv[..., 0][sel][keep]),
+                    "sat": float(np.median(s[keep])), "dark": True, "roundness": 1.0, "r_px": float(r)})
+    return out

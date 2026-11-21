@@ -20,6 +20,7 @@ import math
 import os
 import re
 import random
+import sys
 import time
 
 import cv2
@@ -342,7 +343,7 @@ def apply_probe(cfg, res, a):
     curve = (list(res["curve"][0]), list(res["curve"][1]))
     cfg["z_offset"] = cfg["z_paint"] = contact
     cfg["z_low"] = max(cfg["z_low"], contact + float(S.TRAVEL_MM))             # never closer to the paper than before
-    cfg["z_high"] = max(cfg["z_high"], contact + float(S.HIGH_MM))
+    cfg["z_high"] = max(cfg["z_high"], contact + max(float(S.HIGH_MM), mc.clear_all_mm()))   # over every container
     cfg["curve"] = curve
     cfg["aniso"] = res.get("aniso") if getattr(S, "PROBE_USE_ANISO", False) else None   # see PROBE_USE_ANISO in settings.py
     pf = cfg.get("paper_frame") or {}
@@ -422,6 +423,8 @@ def first_layer_color(img_path, cfg):
         rgb = load_rgb(img_path, cfg["target_width"], rotate=cfg.get("rotate", 0))
         layers = [l for l in find_layers(rgb) if l["mask"].any()]
         usable = [l for l in layers if l["name"] not in ("yellow", "white")]
+        if any(l["name"] != "black" for l in usable):           # the darkest COLOUR, not black: a transparent black is too faint
+            usable = [l for l in usable if l["name"] != "black"]  # to measure (2026-11-12); a black-only job still probes in black
         if usable:
             # the DARKEST colour (luminance on the white paper). Not the brightness channel: saturated red and blue both
             # have brightness 255, so that choice was a tie. The job still paints every colour; only the probe uses this one.
@@ -1448,7 +1451,7 @@ def _plan_piece(job):
             out_bands.append((arr + np.array([ox, oy]), w)); kinds["lines"] += 1
     elif cfg.get("infill_style") == "bands" and comp.sum() >= float(cfg.get("bands_min_mm2", 150.0)) * res * res:   # small fragments keep the plain fill
         cap_mm = max(float(cfg.get("thin_max") or 0.0), cfg["brush_w"] * 1.1)
-        band_px = max(step_px * 0.5, 0.9 * cap_mm * res)
+        band_px = max(step_px * 0.5, float(getattr(S, "BAND_SPACING", 0.9)) * cap_mm * res)
         ys_b, xs_b = np.nonzero(comp)
         cov_b = np.cov(np.vstack([xs_b, ys_b]).astype(float))
         ev, evec = np.linalg.eigh(cov_b)
@@ -1582,6 +1585,7 @@ def plan_strokes(mask, cfg, res=RES):
     # 3. repair pass: whatever the plan still leaves unpainted (thin gaps down the middle of shapes only slightly
     #    wider than the brush, small corners) is painted along the skeleton of the missed area
     # (skeleton style: again, up to 4 rounds, so a shape several marks wide gets side strokes until it is full)
+    patch_from = len(simple) + 10 ** 9
     for _round in range(4 if cfg.get("infill_style") == "skeleton" else 1):
         swapped = [st for st in simple if getattr(st, "reach", None) is not None]
         for st in swapped:                                   # count the slack as covered (see reach_max)
@@ -1596,6 +1600,7 @@ def plan_strokes(mask, cfg, res=RES):
         var_depth = cfg.get("line_depth", 0) > 0 and thin_max > cfg["brush_w"] * 1.1 + 1e-6
         dmiss = cv2.distanceTransform(missed, cv2.DIST_L2, 5) if var_depth else None
         n_before = len(simple)
+        patch_from = min(patch_from, n_before)
         for p in trace_skeleton(skeletonize(missed > 0), min_len_px=max(3, int(float(cfg.get("blob_min_mm", 6.0)) * res * 0.5)), dist=dmiss):
             q = simplify(p, eps, closed=False)
             if len(q) >= 2 and path_length(q) > 0:
@@ -1610,9 +1615,32 @@ def plan_strokes(mask, cfg, res=RES):
                 kinds["patch"] += 1
         if len(simple) == n_before:
             break
+    pmax = getattr(S, "PATCH_MAX_COVERED", None)
+    if pmax is not None and patch_from < len(simple):
+        n0 = len(simple)
+        simple = drop_covered(simple, range(patch_from, n0), mask.shape, cfg, res, float(pmax))
+        if len(simple) < n0:
+            kinds["patch"] -= n0 - len(simple)
+            vprint(f"   {n0 - len(simple)} repair strokes left out: mostly over paint already planned (PATCH_MAX_COVERED)")
     simple = [q if getattr(q, "keep_turns", False) else cut_spur(q, res) for q in simple]   # no stroke goes out and comes back over itself
     simple = drop_covered_spurs(simple, mask.shape, cfg, res)
     return simple, kinds
+
+
+def drop_covered(strokes, cand, shape, cfg, res, share):
+    """The strokes in cand whose footprint the other (kept) strokes already paint for at least `share` are left out, the last
+    ones first (2026-11-20: a glaze shows every second coat as a darker line; run H pass 3: 41% of the repair strokes' area
+    was on paint)."""
+    keep = [True] * len(strokes)
+    for i in sorted(cand, reverse=True):
+        own = render([strokes[i]], shape, cfg["brush_w"], res)
+        n = int(own.sum())
+        if not n:
+            continue
+        others = render([s for j, s in enumerate(strokes) if j != i and keep[j]], shape, cfg["brush_w"], res)
+        if (own & others).sum() >= share * n:
+            keep[i] = False
+    return [s for s, k in zip(strokes, keep) if k]
 
 
 def drop_covered_spurs(strokes, shape, cfg, res=RES):
@@ -1719,11 +1747,15 @@ class Painter:
     def __init__(self, cfg):
         self.cfg = cfg
         self.gcode = ["G90", "G21"]
+        z_acc = getattr(S, "Z_ACCEL", None)
+        if z_acc:                                   # the controller's Z acceleration (Lerdge: 100 mm/s2 = every dip and every
+            self.gcode += [f"M201 Z{int(z_acc)}"]   # diagonal with Z crawls); stays set until the controller restarts
         self.dist_since_dip = 0.0
         self.current_pos = (cfg["dip_x"], cfg["dip_y"])
         self.current_max_dist = random.uniform(cfg["min_dist"], cfg["max_dist"])
         self.dips = 0
         self.dish = None
+        self.cup_dips = {}                  # cup number -> dips planned in this job (cups.py: each dip a little deeper)
 
     def _set_speed(self, mode="travel"):
         c = self.cfg
@@ -1746,6 +1778,23 @@ class Painter:
         """Dip at `dish` = (x, y, radius or None), wipe, travel to (tx, ty). Spiral and jitter shrink to fit a small pool."""
         c = self.cfg
         dx0, dy0, dr = dish if dish is not None else (c["dip_x"], c["dip_y"], None)
+        cup = None
+        if c.get("cups"):
+            import cups as CUPS
+            cup = CUPS.cup_at(c["cups"], dx0, dy0)
+        if cup is not None:                   # a cup of the palette: over the rims, slowly in, stir, wipe on its own rim, out high
+            k = self.cup_dips.get(cup["n"], 0)
+            lines, _ = CUPS.dip_gcode(c["cups"], cup, c["z_paint"], k, c["feed"], c["wipe_feed"],
+                                      start_xy=self.current_pos, z_low=c["z_low"])
+            self.cup_dips[cup["n"]] = k + 1
+            self.dips += 1
+            self.gcode += lines
+            self.gcode.append("; travel to the next stroke")
+            self.gcode.append(f"G0 X{tx:.3f} Y{ty:.3f} Z{c['z_low']:.3f} F{c['feed']}")
+            self.dist_since_dip = 0.0
+            self.current_max_dist = random.uniform(c["min_dist"], c["max_dist"])
+            self.current_pos = (tx, ty)
+            return
         jitter, spiral = c["dip_jitter"], c["dip_spiral_r"]
         if dr is not None:
             spiral = min(spiral, 0.6 * dr)
@@ -1853,7 +1902,11 @@ class Painter:
             return
         self.dish = dish
         self.gcode.append(f"\n; ===== LAYER {name} =====")
-        if rinse and c.get("water"):
+        if rinse and c.get("rinse"):                                           # the long rinse container: wash, blot, stop high above the dish
+            import rinse as RN
+            self.gcode += RN.gcode(c["rinse"], c["z_paint"], (dish[0], dish[1]), c["feed"])
+            self.current_pos = (dish[0], dish[1])
+        elif rinse and c.get("water"):
             self._dip_and_travel(dish[0], dish[1], dish=c["water"])            # rinse, then stop above the paint dish
         first = paths_mm[0][0]
         self._dip_and_travel(first[0], first[1], dish=self.dish)               # load the colour
@@ -2085,7 +2138,7 @@ def default_config():
         "painterly_len_mm": tuple(getattr(S, "PAINTERLY_LEN_MM", (20.0, 40.0))),
         "infill_coverage": float(getattr(S, "INFILL_COVERAGE", 1.0)),
         "min_dist": S.DIP_MIN_MM, "max_dist": S.DIP_MAX_MM,
-        "z_paint": 0.0, "z_low": S.TRAVEL_MM, "z_high": S.HIGH_MM, "z_wipe_exit": S.WIPE_EXIT_MM,
+        "z_paint": 0.0, "z_low": S.TRAVEL_MM, "z_high": max(S.HIGH_MM, mc.clear_all_mm()), "z_wipe_exit": S.WIPE_EXIT_MM,
         "x_off": 15.0, "y_off": 90.0,
         "dip_x": S.DIP_X, "dip_y": S.DIP_Y, "dip_z": S.PAINT_DIP_Z, "dip_jitter": S.PAINT_DIP_JITTER,
         "dip_spiral_loops": S.PAINT_DIP_SPIRAL_LOOPS, "dip_spiral_r": S.PAINT_DIP_SPIRAL_R, "wipe_r": S.PAINT_WIPE_R,
@@ -2094,7 +2147,17 @@ def default_config():
         "min_roundness": S.POOL_MIN_ROUNDNESS, "min_pool_area": S.POOL_MIN_AREA_MM2, "palette_radius": S.PALETTE_RADIUS_MM,
         "snapshot": (S.SNAPSHOT_X, S.SNAPSHOT_Y),
         "water": (S.WATER_X, S.WATER_Y, S.WATER_R) if S.WATER_X is not None and S.WATER_Y is not None else None,
+        "rinse": _load_rinse(),                                     # the long rinse container (rinse.py / rinse.json), or None
     }
+
+
+def _load_rinse():
+    try:
+        import rinse as RN
+        return RN.load()
+    except Exception as e:
+        print(f"rinse: not used ({e})")
+        return None
 
 
 def machine_mapper(cfg):
@@ -2104,6 +2167,77 @@ def machine_mapper(cfg):
         o, u, v = np.array(pl["origin_mm"]), np.array(pl["u"]), np.array(pl["v"])
         return lambda x, y: (o[0] + x * u[0] + y * v[0], o[1] + x * u[1] + y * v[1])
     return lambda x, y: (x + cfg["x_off"], y + cfg["y_off"])
+
+
+def _paper_corners_mm(cfg):
+    """The usable sheet's 4 corners in machine mm (from the paper frame), or [] without one."""
+    pf = cfg.get("paper_frame")
+    if not pf:
+        return []
+    c, u, v = np.array(pf["origin_mm"]), np.array(pf["u"]), np.array(pf["v"])
+    a0, a1 = float(pf.get("a_left", 0.0)), float(pf.get("a_left", 0.0)) + float(pf["paper_w"])
+    b0, b1 = float(pf.get("b_bot", 0.0)), float(pf.get("b_bot", 0.0)) + float(pf["paper_h"])
+    return [c + a * u + b * v for a, b in ((a0, b0), (a1, b0), (a1, b1), (a0, b1))]
+
+
+def test_line(slot, n, upright_w, upright_h):
+    """Test stroke number `slot` (0, 1, .. in the order the paints are first used) of at most `n`: its points every 0.5 mm in
+    upright artwork mm (x right, y up), fat end first, in the strip over the picture (COLOR_TEST_GAP_MM over its top,
+    COLOR_TEST_STRIP_MM wide). The strokes cross the strip steeply (COLOR_TEST_RUN), by turns / and \, as a chain: the fat ends
+    lie apart along its two edges, every stroke crosses its neighbours (the one before it: the paint over an earlier paint) and
+    keeps bare paper of its own (color_paint measures each band there and at the crossings)."""
+    strip, gap = float(getattr(S, "COLOR_TEST_STRIP_MM", 25.0)), float(getattr(S, "COLOR_TEST_GAP_MM", 6.0))
+    L = min(float(getattr(S, "COLOR_TEST_LEN_MM", 140.0)), float(upright_w))
+    W, y0 = max(strip - 6.0, 1.0), float(upright_h) + gap + 3.0          # 3 mm in from the strip's edges: the fat ends
+    # each stroke's run along the strip (2026-11-16: 0.45 -> COLOR_TEST_RUN 0.2: at 0.45 the strokes going the same way lay only
+    # 3.6 mm apart, the fat ends touched and the camera read green and yellow as one; steeper = far apart, each crosses ~2 others)
+    D = float(getattr(S, "COLOR_TEST_RUN", 0.2)) * L
+    xs = (float(upright_w) - L) / 2.0 + slot * (L - D) / max(n - 1, 1)
+    # COLOR_TEST_CROSS False (2026-11-17): all the same way, side by side, each on its own bare paper - crossing a wet band
+    # carried green into the yellow cup and blue into the white
+    ya, yb = (y0, y0 + W) if slot % 2 == 0 or not bool(getattr(S, "COLOR_TEST_CROSS", False)) else (y0 + W, y0)
+    k = max(2, int(math.hypot(D, W) / 0.5) + 1)
+    s_ = np.linspace(0.0, 1.0, k)
+    return np.c_[xs + D * s_, ya + (yb - ya) * s_]
+
+
+def test_strokes(cfg, to_mm):
+    """TEST_STROKES (set by color_paint) as strokes in machine mm: (the job's own ones, [(label, cup, stroke)] of other paints).
+    Each runs from its fat end (as deep as the lines go) to its thin end (the touch height): its width at every depth, and the
+    paint over the strokes it crosses."""
+    if not TEST_STROKES:
+        return [], []
+    pl = cfg.get("placement") or {}
+    turned = int(pl.get("rotate", cfg.get("rotate", 0)) or 0) == 90
+    art_w = float(pl.get("width_mm") or cfg["target_width"])
+    w_hi, w_lo = float(getattr(S, "COLOR_TEST_FAT_MM", 3.5)), 0.0      # through the probe curve: this wide -> the touch
+    own, other = [], []
+    upright_w, upright_h = (float(pl["height_mm"]), art_w) if turned else (art_w, float(pl.get("height_mm") or 0.0))
+    for t in TEST_STROKES:
+        pts = test_line(t["slot"], t["n"], upright_w, upright_h)
+        # a BAND of COLOR_TEST_LINES parallel strokes from one dip (2026-11-16: one stroke was too thin to see well), the middle
+        # one on the planned line (color_paint measures along it)
+        nl, gp = max(1, int(getattr(S, "COLOR_TEST_LINES", 1) or 1)), float(getattr(S, "COLOR_TEST_LINE_GAP_MM", 1.2))
+        d = (pts[-1] - pts[0]) / max(float(np.linalg.norm(pts[-1] - pts[0])), 1e-6)
+        perp = np.array([-d[1], d[0]])
+        band = []
+        for j in sorted(range(nl), key=lambda j: abs(j - (nl - 1) / 2.0)):   # the middle one first
+            q = pts + (j - (nl - 1) / 2.0) * gp * perp[None]
+            if turned:                                                       # upright (x, y) -> turned artwork (art_w - y, x)
+                q = np.c_[art_w - q[:, 1], q[:, 0]]
+            st = Stroke([to_mm(x, y) for x, y in q], "line")
+            st.widths = list(np.linspace(w_hi, w_lo, len(st)))
+            st.group, st.fixed_dir, st.tier = "test", True, 0
+            band.append(st)
+        if t.get("cup") is None:
+            own.extend(band)
+            continue
+        cup = next((c for c in (cfg.get("cups") or {}).get("cups", []) if c["n"] == t["cup"]), None)
+        if cup is None or not cup.get("filled"):
+            print(f"test stroke of {t['label']}: cup {t['cup']} is not there or empty - left out")
+            continue
+        other.extend((t["label"], cup, st) for st in band)
+    return own, other
 
 
 def signature_file():
@@ -2173,6 +2307,24 @@ def plan_signature(cfg, res=RES):
 
 LAYER_BGR = {"blue": (255, 90, 0), "red": (0, 0, 255), "green": (0, 200, 0), "yellow": (0, 230, 255), "orange": (0, 140, 255),
              "cyan": (255, 255, 0), "purple": (200, 0, 160), "pink": (180, 100, 255), "black": (60, 60, 60)}
+
+
+def layer_colour(name):
+    """The colour a layer is drawn in: a test stroke's own paint, else the job's paint (color_paint: a covering paint or a
+    white has no hue of its own, its pass picture is grey and its layer is called 'black'), else the layer's hue."""
+    for t in TEST_STROKES:
+        if t.get("cup") is not None and t["label"] == name:
+            return tuple(int(v) for v in t["bgr"])
+    if JOB_INFO and JOB_INFO.get("bgr") is not None:
+        return tuple(int(v) for v in JOB_INFO["bgr"])
+    return LAYER_BGR.get(name, (0, 0, 255))
+
+
+def layer_label(name):
+    """A layer's name as shown: the real paint of a color_paint job ('opaque magenta', 'white'), not its picture's hue."""
+    if any(t.get("cup") is not None and t["label"] == name for t in TEST_STROKES):
+        return name
+    return (JOB_INFO or {}).get("label") or name
 
 
 def draw_stroke(img, pts, widths_mm, ppm, color, th0, aa=cv2.LINE_AA, mask=None):
@@ -2252,7 +2404,11 @@ def draw_overlay(frame, H, H_inv, layers_out, dishes, cfg, det, out_png, art=Non
         for name, paths_mm in layers_out:
             for p in paths_mm:
                 pts = mm_to_px_array(H_inv, p)
-                draw_stroke(layer, pts, getattr(p, "widths", None), px_per_mm, LAYER_BGR.get(name, (0, 0, 255)), th)
+                draw_stroke(layer, pts, getattr(p, "widths", None), px_per_mm, layer_colour(name), th)
+    for name, paths_mm in layers_out:                                          # test strokes: not in the artwork picture either
+        for p in paths_mm:
+            if getattr(p, "group", None) == "test":
+                draw_stroke(layer, mm_to_px_array(H_inv, p), p.widths, px_per_mm, layer_colour(name), th)
     for name, paths_mm in layers_out:                                          # the signature is not in the artwork picture: always as strokes
         for p in paths_mm:
             if getattr(p, "group", None) == "signature":
@@ -2267,8 +2423,30 @@ def draw_overlay(frame, H, H_inv, layers_out, dishes, cfg, det, out_png, art=Non
             cv2.circle(out, (int(p[0]), int(p[1])), max(8, int(r * px_per_mm)), col, 3, cv2.LINE_AA)
             cv2.putText(out, text, (int(p[0]) + 12, int(p[1]) - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 5, cv2.LINE_AA)
             cv2.putText(out, text, (int(p[0]) + 12, int(p[1]) - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
+    def cup_mark(cup, text, col):                                              # a cup: its rim, where the camera sees it
+        import cups as CUPS
+        q = CUPS.rim_px(cfg["cups"], cup, H, H_inv, (w, h)).astype(np.int32)
+        cv2.polylines(out, [q], True, (0, 0, 0), 6, cv2.LINE_AA)
+        cv2.polylines(out, [q], True, col, 3, cv2.LINE_AA)
+        x_, y_ = int(q[:, 0].min()), int(q[:, 1].min()) - 12
+        cv2.putText(out, text, (x_, y_), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 5, cv2.LINE_AA)
+        cv2.putText(out, text, (x_, y_), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
+    shown = set()
     for name, (x, y, r, note) in dishes.items():
-        mark(x, y, r or 10, f"{name} dip", LAYER_BGR.get(name, (255, 0, 255)))
+        cup = None
+        if cfg.get("cups"):
+            import cups as CUPS
+            cup = CUPS.cup_at(cfg["cups"], x, y)
+        if cup is not None:
+            if cup["n"] in shown:
+                continue
+            shown.add(cup["n"])
+            lab_ = layer_label(name)
+            if not lab_.startswith(("opaque", "transparent", "test")):
+                lab_ = f"{cup['kind']} {lab_}"                                   # "cup 11 - transparent black"
+            cup_mark(cup, f"cup {cup['n']} - {lab_}", layer_colour(name))
+        else:
+            mark(x, y, r or 10, f"{layer_label(name)} dip", layer_colour(name))
     for x, y, r, text in cfg.get("pools_ignored", []):
         mark(x, y, r, text, (170, 170, 170))                                   # what the camera saw but did not use
     if cfg.get("water"):
@@ -2311,7 +2489,30 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
         import vision as PL
         from vision import load_calibration
         cal = load_calibration()
-        seen = PL.find_pools(frame, cal["H"], det["corners_px"] if det else None)
+        import json as _json
+        if SCENE_KEEP and os.path.isfile(SCENE_KEEP):
+            # a later pass of a run on one sheet: the dishes and the rinse container exactly as the first pass found them (the
+            # person watched that one); finding them again only adds chances to go wrong (dark rinse water, 2026-11-13)
+            scene = _json.load(open(SCENE_KEEP))
+            seen = scene["pools"]
+            cfg["rinse"] = scene.get("rinse")
+            cfg["cups"] = scene.get("cups")
+            print(f"dishes and rinse container: as found before the first pass ({SCENE_KEEP})")
+        else:
+            seen = PL.find_pools(frame, cal["H"], det["corners_px"] if det else None)
+            if getattr(S, "RINSE_FILE", "rinse.json") is not None:             # the rinse container where the camera sees it now
+                import rinse as RN
+                cfg["rinse"] = RN.choose(frame, cal["H"], cal["H_inv"], det["corners_px"] if det else None, cfg.get("rinse"))
+            if getattr(S, "CUP_FILE", "cups.json") is not None:               # the 12-cup palette (cups.py)
+                import cups as CUPS
+                cfg["cups"] = CUPS.choose(frame, cal["H"], cal["H_inv"], det["corners_px"] if det else None)
+                if not cfg["cups"]:
+                    raise SystemExit("the 12-cup palette was not found (is the toolhead out of the camera picture? cups_detect.png). "
+                                     "Not painted: the old round dishes travel too low for the cups. Without a palette set "
+                                     "CUP_FILE = None in settings.py.")
+            if SCENE_KEEP:
+                _json.dump({"pools": seen, "rinse": cfg.get("rinse"), "cups": cfg.get("cups")}, open(SCENE_KEEP, "w"), indent=1,
+                           default=lambda o: o.tolist() if hasattr(o, "tolist") else float(o))
         # the paint dishes are near the dip position (DIP_X / DIP_Y in settings.py); a red LED, a cable or a label
         # somewhere else in the picture is not a dish, however well its colour matches
         vprint(f"paint pools the camera sees outside the paper (dishes must be within {cfg['palette_radius']:.0f} mm of the dip position "
@@ -2335,7 +2536,22 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
                   f"area {p['area_mm2']:5.0f} mm2   {verdict}")
         if not seen:
             vprint("   none")
-    dishes = assign_dishes(layers, pools, cfg)
+        if cfg.get("cups"):                   # the palette is there: its filled cups are the dishes, nothing else
+            import cups as CUPS
+            pools = CUPS.pools(cfg["cups"], kind=cfg.get("cup_kind"))
+            cfg["pools_ignored"] = []
+            vprint(f"paint cups ({cfg.get('cup_kind') or getattr(S, 'CUP_KIND', 'any')}): " +
+                   (", ".join(f"{p['cup']} {p['kind']} {hue_name(p['hue'])}" + (" dark" if p.get("dark") else "") for p in pools) or "none filled"))
+    if cfg.get("cup_force") and cfg.get("cups"):           # one cup for the whole job (color_paint: the pass's own paint)
+        import cups as CUPS
+        cup = next((c for c in cfg["cups"]["cups"] if c["n"] == cfg["cup_force"]), None)
+        if cup is None:
+            raise SystemExit(f"--cup {cfg['cup_force']}: no such cup in the palette (cups.py show)")
+        if not cup.get("filled"):
+            raise SystemExit(f"--cup {cfg['cup_force']}: the camera sees this cup EMPTY (cups_detect.png)")
+        dishes = {l["name"]: (cup["xy"][0], cup["xy"][1], 11.0, f"cup {cup['n']} ({cup['kind']}), given by --cup") for l in layers}
+    else:
+        dishes = assign_dishes(layers, pools, cfg)
     names = ", ".join(f"{l['name']} ({100 * l['share']:.1f}%)" for l in layers)
     vprint(f"layers: {names}")
     for l in layers:
@@ -2411,18 +2627,22 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
                   f"Z {cfg['z_paint'] - cfg['line_depth']:.2f} for marks {cfg['w_ref']:.2f} mm or wider (--width_min / --width_ref)")
             vprint(f"   so the typical marks (10% .. 90%) are painted between Z {zq[2]:.2f} and Z {zq[0]:.2f}  - {abs(zq[0] - zq[2]):.2f} mm of the {cfg['line_depth']:.2f} mm available")
     sign = []
-    for p in plan_signature(cfg):                                           # painted FIRST: on the sheet even when the run is stopped
+    for p in (plan_signature(cfg) if bool(getattr(S, "SIGN_PAINT", True)) else []):   # painted FIRST (SIGN_PAINT False: room only)
         st = Stroke([to_mm(x, y) for x, y in p], "line")
         st.widths, st.group = p.widths, p.group
         sign.append(st)
     if sign:
         vprint(f"\nsignature: {len(sign)} strokes, painted first (with the first layer, {planned[0][0]['name']})")
+    tests_own, tests_other = test_strokes(cfg, to_mm)
     layers_out, summary = [], []
     for idx, (L, strokes, kinds, paths_mm) in enumerate(planned):
         vprint(f"\nlayer {L['name']} plan:")
         ordered, pos = [], dishes[L["name"]][:2]
+        if idx == 0 and tests_own:                                          # the test stroke: the first thing after the first dip
+            ordered = list(tests_own)
+            pos = ordered[-1][-1]
         if idx == 0 and sign:
-            ordered = PathOptimizer.optimize(sign, pos)
+            ordered += PathOptimizer.optimize(sign, pos)
             pos = ordered[-1][-1]
         for tier in sorted({p.tier for p in paths_mm}):                     # biggest blobs first, then smaller ones, then the rest
             # a leaf is painted in one go: its veins stay together (in their own order, middle first); the leaves are ordered as units
@@ -2451,10 +2671,20 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
                 pos = part[-1][-1] if part[-1].fixed_dir else part[-1][0]   # roughly where the brush ends (the painter picks the nearer end)
         paths_mm = ordered
         n0, d0 = len(painter.gcode), painter.dips
-        painter.write_layer(L["name"], paths_mm, dishes[L["name"]][:3], rinse=idx > 0)
+        # with the rinse container, every colour of a job with several colours starts with a clean brush (the first one too: the
+        # probe lines were painted with the darkest colour, the job before ended with another)
+        painter.write_layer(L["name"], paths_mm, dishes[L["name"]][:3], rinse=idx > 0 or (bool(cfg.get("rinse")) and (len(planned) > 1 or bool(getattr(S, "RINSE_BEFORE_JOB", False)))))
         report(L["name"], L["mask"], strokes, kinds, painter.dips - d0, len(painter.gcode) - n0, cfg, f"{base}_{L['name']}_preview.png")
         layers_out.append((L["name"], paths_mm))
         summary.append((L["name"], kinds, sum(1 for p in paths_mm if p.kind == "line" and p.widths and cfg["line_depth"] > 0)))
+    bands = {}
+    for name, cup, st in tests_other:                                       # other paints' test bands: a rinse, a dip, its strokes
+        bands.setdefault(name, (cup, []))[1].append(st)
+    for name, (cup, sts) in bands.items():
+        dishes[name] = (cup["xy"][0], cup["xy"][1], 11.0, f"cup {cup['n']} ({cup['kind']}), its test stroke")
+        painter.write_layer(name, sts, dishes[name][:3], rinse=True)
+        layers_out.append((name, sts))
+        vprint(f"test stroke: {name} from cup {cup['n']} ({cup['kind']}), {len(sts)} lines")
     allp = np.array([pt for _, ps in layers_out for p in ps for pt in p])
     vprint(f"\nartwork lands at machine X {allp[:, 0].min():.1f}..{allp[:, 0].max():.1f} mm, Y {allp[:, 1].min():.1f}..{allp[:, 1].max():.1f} mm")
     pl, zf, zl = cfg.get("placement"), cfg["z_paint"], cfg["z_paint"] - cfg["line_depth"]
@@ -2488,6 +2718,13 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
     header.append("; =========================================")
     painter.gcode[2:2] = header
     code = painter.finish()
+    if cfg.get("rinse"):                                                    # no move may pass low over the rinse container
+        import rinse as RN
+        RN.warn_moves(code, cfg["rinse"], cfg["z_paint"], "the painting")
+    if cfg.get("cups"):                                                     # ... nor low over the palette
+        import cups as CUPS
+        CUPS.warn_moves(code, cfg["cups"], cfg["z_paint"], "the painting")
+    cfg["cup_dips_planned"] = dict(painter.cup_dips)
     if cfg.get("tool_offset"):
         code = shift_gcode_xy(code, -cfg["tool_offset"][0], -cfg["tool_offset"][1])
     with open(out_gcode, "w") as f:
@@ -2507,7 +2744,13 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
         from vision import load_calibration
         cal = load_calibration()
         plan = {"layers_out": layers_out, "H_inv": cal["H_inv"], "brush_w": cfg["brush_w"],
-                "dishes": {n: tuple(d[:3]) for n, d in dishes.items()}}
+                "dishes": {n: tuple(d[:3]) for n, d in dishes.items()},
+                # the overlay's extras: Z -> width (the probe curve), the sheet and the picture for the minimap
+                "z_paint": cfg["z_paint"], "curve": cfg.get("curve"), "line_depth": cfg.get("line_depth", 0.0),
+                "paper_mm": [list(map(float, PP_corner)) for PP_corner in _paper_corners_mm(cfg)],
+                "art_mm": [list(map(float, c)) for c in __import__("vision").placement_corners_mm(cfg["placement"])]
+                if cfg.get("placement") else None,
+                "infill": cfg.get("infill_style")}
         if str(getattr(S, "OVERLAY_SHOW", "art")).lower() == "art":           # the live preview shows the artwork's marks, like the overlay
             plan["art_layer"] = _art_marks_layer(cv2.imread(img_path), frame, cfg, cal["H"])
     return code, (overlay_ts if frame is not None else None), plan
@@ -2517,6 +2760,24 @@ def run(img_path, cfg, out_gcode, frame=None, det=None):
 def connect_and_home(cfg):
     """Connects to the machine (port and speed from settings.py) and homes it: Z, a lift to HOME_LIFT_Z, then XY."""
     return mc.open_machine(home=True, quiet=True)
+
+
+def rinse_at_end(machine, cfg):
+    """The job (repairs included) is over: one rinse in the rinse container, so the brush does not dry with paint in it
+    (RINSE_AT_END in settings.py). It ends high above the snapshot position."""
+    if machine is None or not cfg.get("rinse") or not getattr(S, "RINSE_AT_END", True):
+        return
+    import rinse as RN
+    print("rinsing the brush (the job is over)")
+    code = "\n".join(RN.gcode(cfg["rinse"], cfg["z_paint"], cfg["snapshot"], cfg["feed"]))
+    if cfg.get("tool_offset"):
+        code = shift_gcode_xy(code, -cfg["tool_offset"][0], -cfg["tool_offset"][1])
+    try:
+        for l in code.split("\n"):
+            machine.send_line(l, timeout=120)
+        machine.flush_motion()
+    except Exception as e:
+        print(f"   the rinse at the end failed ({e}): wash the brush by hand")
 
 
 def go_to_snapshot(machine, cfg, settle=1.0):
@@ -2563,21 +2824,47 @@ def show_picture(path):
             pass
 
 
+CMD_INFO = []              # command_table: (state, cup text, Z, X, Y) for every command it returns
+
+
 def command_table(code):
     """[(line, layer, dips so far, stroke end)] for every command, and the estimated cumulative seconds after each one
     (distance / feed; accelerations ignored, so it is only a rough guide). stroke end = the leaf / 'line' whose stroke ends with this
     command (from the '; STROKE END' marks), else None."""
+    global CMD_INFO
     cmds, layer, dips = [], "", 0
+    info, state, cup = [], "TRAVEL", ""                     # what the brush is doing at each command (the live preview)
     for raw in code.split("\n"):
         l = raw.strip()
         if l.startswith("; ===== LAYER"):
             layer = l.split("LAYER", 1)[1].strip(" =")
         elif l.startswith("; --- DIP CYCLE"):
             dips += 1
+            state = "DIP"
+        elif l.startswith("; CUP "):                         # "; CUP 2 (opaque) dip 14: 4.30 mm over its floor (Z ...), rim Z ..."
+            cup = l[2:].split(" (Z", 1)[0]
+        elif l.startswith("; wipe on the rim"):
+            state = "WIPE"
+        elif l.startswith("; travel to the next stroke") or l.startswith("; --- RINSE END"):
+            state = "TRAVEL"
+        elif l.startswith("; --- RINSE"):
+            state = "RINSE"
         elif l.startswith("; STROKE END") and cmds:
             cmds[-1] = cmds[-1][:3] + (l.split("STROKE END", 1)[1].strip(),)
         elif l and not l.startswith(";"):
+            if state == "TRAVEL" and l.startswith("G1") and "X" in l:
+                state = "PAINT"                              # the first painting move after the travel
+            elif state == "PAINT" and l.startswith("G0"):
+                state = "TRAVEL"
+            xyz = list(info[-1][2:]) if info else [None, None, None]
+            if l.startswith(("G0", "G1")):
+                for k, ax in enumerate(("Z", "X", "Y")):
+                    m_ = re.search(r" " + ax + r"(-?[\d.]+)", l)
+                    if m_:
+                        xyz[k] = float(m_.group(1))
             cmds.append((l, layer, dips, None))
+            info.append((state, cup, *xyz))
+    CMD_INFO = info
     cum, t, feed, pos = [], 0.0, 3000.0, [0.0, 0.0, 0.0]
     for l, *_ in cmds:
         if l.startswith(("G0", "G1")):
@@ -2590,6 +2877,46 @@ def command_table(code):
             t += float((re.findall(r"P(\d+)", l) or ["0"])[0]) / 1000.0
         cum.append(t)
     return cmds, cum
+
+
+class _Tail:
+    """Keeps the last lines printed to the terminal (the live preview shows them); everything still goes to the terminal."""
+    def __init__(self, stream):
+        import collections
+        self.s, self.buf, self.lines = stream, "", collections.deque(maxlen=8)
+
+    @classmethod
+    def install(cls):
+        t = cls(sys.stdout)
+        sys.stdout = t
+        return t
+
+    def remove(self):
+        if sys.stdout is self:
+            sys.stdout = self.s
+
+    def write(self, text):
+        try:
+            self.buf += text
+            while "\n" in self.buf or "\r" in self.buf:
+                k = min(i for i in (self.buf.find("\n"), self.buf.find("\r")) if i >= 0)
+                line, self.buf = self.buf[:k], self.buf[k + 1:]
+                line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()
+                if line:
+                    self.lines.append(line)
+            self.buf = self.buf[-2000:]
+        except Exception:
+            pass
+        return self.s.write(text)
+
+    def last(self, n):
+        return list(self.lines)[-n:]
+
+    def flush(self):
+        return self.s.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.s, name)
 
 
 class LivePreview:
@@ -2613,10 +2940,13 @@ class LivePreview:
             self.win = "brushography://live_feed  [Q] close  [O] planned strokes"
             self.glass = _hx.Glass()
         self._disp, self._shown, self._win_open, self._last_pump = None, None, False, 0.0
+        self.info = list(CMD_INFO) if len(CMD_INFO) == total else []   # what the brush does at each command (command_table)
+        self.tail = None
 
     def start(self):
         import threading
         import machine as _mc
+        self.tail = _Tail.install()                                 # the last lines of the terminal, for the overlay
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
         _mc.WAIT_HOOK = self.pump                                  # the main thread shows the window while it waits for the machine
@@ -2691,6 +3021,9 @@ class LivePreview:
         self.stop_flag = True
         if self.thread:
             self.thread.join(timeout=3)
+        if self.tail is not None:
+            self.tail.remove()
+            self.tail = None
         self._close_window()
 
     def _plan_layer(self, shape):
@@ -2708,11 +3041,87 @@ class LivePreview:
         ppm = float(np.hypot(*(b - a))) / 10.0                                     # camera pixels per mm
         th0 = max(1, int(round(self.plan["brush_w"] * ppm)))
         for name, paths in self.plan["layers_out"]:
-            col = LAYER_BGR.get(name, (0, 0, 255))
+            col = layer_colour(name)
             for p in paths:
                 pts = mm_to_px_array(Hi, p)
                 draw_stroke(img, pts, getattr(p, "widths", None), ppm, col, th0, mask=mask)
         return img, mask > 0
+
+    def _now(self):
+        """(state, cup text, Z, X, Y) at the command being sent, or Nones."""
+        if self.info and 1 <= self.i <= len(self.info):
+            return self.info[self.i - 1]
+        return ("", "", None, None, None)
+
+    def _extras(self, img):
+        """The overlay's extras for a color_paint job (and the state of the brush for any job). Draws on img (the 1280-wide
+        picture): the passes as chips in their paint colours and the colour error (dE) before each pass, and a minimap of the
+        sheet with the brush. Returns (the lines under the title, the state word)."""
+        h, w = img.shape[:2]
+        dim, bright = (58, 158, 46), (51, 255, 51)                 # the theme's dim and bright green (BGR)
+        state, cup, z, x, y = self._now()
+        lines = []
+        J = JOB_INFO or {}
+        if J.get("status"):
+            lines.append((J["status"] + (f"   infill::{J['infill']}" if J.get("infill") else "")
+                          + (f" smooth {J['smooth']:g} mm" if J.get("smooth") is not None else ""), "bright"))
+        detail = ""
+        if state in ("DIP", "WIPE") and cup:                       # "CUP 2 (opaque) dip 14: 4.30 mm over its floor"
+            m_ = re.search(r"CUP (\d+) \((\w+)\) dip (\d+): ([\d.]+) mm", cup)
+            if m_:
+                n, kind, k, over = int(m_.group(1)), m_.group(2), int(m_.group(3)), float(m_.group(4))
+                lo, hi = float(getattr(S, "CUP_DIP_END_MM", 2.0)), float(getattr(S, "CUP_DIP_START_MM", 5.0))
+                left = max(0.0, min(1.0, (over - lo) / max(hi - lo, 1e-6)))
+                lab_ = layer_label(self.layer)
+                if not lab_.startswith(("opaque", "transparent", "test")):
+                    lab_ = f"{kind} {lab_}"
+                nb = int(round(10 * left))
+                detail = f"cup {n} - {lab_} - dip {k} - {over:.2f} mm over the floor   paint [{'#' * nb}{'.' * (10 - nb)}]"
+        elif state == "PAINT" and z is not None and self.plan.get("z_paint") is not None:
+            depth = float(self.plan["z_paint"]) - z
+            cv_ = self.plan.get("curve")
+            wd = float(np.interp(depth, cv_[0], cv_[1])) if cv_ is not None and depth >= 0 else None
+            detail = f"Z {z:.2f}: {depth:+.2f} mm into the paper" + (f" ~ {wd:.1f} mm wide" if wd is not None else "")
+        if detail:
+            lines.append((detail, "ink"))
+        for t in (self.tail.last(2) if self.tail is not None else []):
+            lines.append((t[:150], "dim"))
+        top = 74 + 24 * len(lines)
+        chips = J.get("chips") or []                               # the passes so far, in their paint colours
+        x0, y0, sz = w - 16 - 22 * len(chips), top + 10, 18
+        for k, (bgr, cur) in enumerate(chips):
+            p0 = (x0 + 22 * k, y0)
+            cv2.rectangle(img, p0, (p0[0] + sz, p0[1] + sz), tuple(int(v) for v in bgr), -1)
+            cv2.rectangle(img, p0, (p0[0] + sz, p0[1] + sz), bright if cur else dim, 2 if cur else 1)
+        de = [v for v in (J.get("de") or []) if v is not None]
+        if len(de) >= 2:                                           # the colour error before each pass: it should fall
+            bx0, by0, bw, bh = w - 16 - 220, y0 + sz + 10, 220, 60
+            cv2.rectangle(img, (bx0, by0), (bx0 + bw, by0 + bh), dim, 1)
+            hi_, lo_ = max(de), min(de)
+            pts = [(bx0 + int(bw * k / (len(de) - 1)), by0 + bh - 4 - int((bh - 8) * (v - lo_) / max(hi_ - lo_, 1e-6)))
+                   for k, v in enumerate(de)]
+            cv2.polylines(img, [np.array(pts, np.int32)], False, bright, 2, cv2.LINE_AA)
+            cv2.putText(img, f"dE {de[0]:.1f} -> {de[-1]:.1f}", (bx0 + 4, by0 + bh + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                        bright, 1, cv2.LINE_AA)
+        paper, art = self.plan.get("paper_mm") or [], self.plan.get("art_mm")
+        if len(paper) == 4 and self.plan.get("H_inv") is not None:   # the minimap: the sheet, the picture, the brush - as the
+            Hi = self.plan["H_inv"]                                   # camera sees them (the same way round as the picture)
+            P = mm_to_px_array(Hi, paper)
+            lo2, hi2 = P.min(axis=0), P.max(axis=0)
+            mw = 180
+            sc = mw / max(hi2[0] - lo2[0], 1e-6)
+            mh = int((hi2[1] - lo2[1]) * sc)
+            ox, oy = w - 16 - mw, h - 40 - mh
+            to = lambda q: (int(ox + (q[0] - lo2[0]) * sc), int(oy + (q[1] - lo2[1]) * sc))
+            cv2.rectangle(img, (ox - 6, oy - 6), (ox + mw + 6, oy + mh + 6), (6, 16, 9), -1)
+            cv2.polylines(img, [np.array([to(q) for q in P], np.int32)], True, dim, 1, cv2.LINE_AA)
+            if art:
+                cv2.polylines(img, [np.array([to(q) for q in mm_to_px_array(Hi, art)], np.int32)], True, dim, 1, cv2.LINE_AA)
+            if x is not None and y is not None:
+                cx_, cy_ = to(mm_to_px_array(Hi, [(x, y)])[0])
+                cx_, cy_ = min(max(cx_, ox - 4), ox + mw + 4), min(max(cy_, oy - 4), oy + mh + 4)   # off the sheet: on its edge
+                cv2.circle(img, (cx_, cy_), 5, bright, -1, cv2.LINE_AA)
+        return lines, state
 
     def _loop(self):
         cap = None
@@ -2764,8 +3173,13 @@ class LivePreview:
                     info = (f"t+{int(el // 60):02d}:{int(el % 60):02d}" +
                             (f"  eta {int(left // 60):02d}:{int(left % 60):02d}" if left is not None and not self.done else "") +
                             f"  dips {self.dips}  line {self.i}/{self.total}")
-                    themed = self.hx.hud(small, "job complete" if self.done else f"layer::{self.layer or '-'}", info,
-                                         time.strftime("%H:%M:%S"), frac, done=self.done, frozen=same > 45, t=el)
+                    try:
+                        more, word = self._extras(small)                # chips, dE curve, minimap drawn; the lines for the hud
+                    except Exception:                               # the overlay's extras must never stop the painting
+                        more, word = [], ""
+                    themed = self.hx.hud(small, "job complete" if self.done else f"layer::{layer_label(self.layer) if self.layer else '-'}"
+                                         + (f"  [{word}]" if word and not self.done else ""), info,
+                                         time.strftime("%H:%M:%S"), frac, done=self.done, frozen=same > 45, t=el, more=more)
                     if themed is not None:
                         self._disp = self.glass.apply(themed)
                         self.pump()                                 # draws here except on macOS
@@ -2776,7 +3190,7 @@ class LivePreview:
                 cv2.rectangle(bar, (0, h - 22), (w, h), (0, 0, 0), -1)
                 disp = cv2.addWeighted(bar, 0.6, disp, 0.4, 0)
                 cv2.rectangle(disp, (0, h - 22), (int(w * frac), h), (0, 200, 0), -1)
-                title = "FINISHED" if self.done else f"layer: {self.layer or '-'}"
+                title = "FINISHED" if self.done else f"layer: {layer_label(self.layer) if self.layer else '-'}"
                 info = (f"{100 * frac:.0f}%   elapsed {int(el // 60):02d}:{int(el % 60):02d}" +
                         (f"   about {int(left // 60):02d}:{int(left % 60):02d} left" if left is not None and not self.done else "") +
                         f"   dips {self.dips}   line {self.i}/{self.total}")
@@ -2964,6 +3378,8 @@ def aim_wipe(block, tx, ty, wipe_r):
     """The dip cycle (copied from the job) with its wipe turned towards (tx, ty). The copy wipes towards the JOB's first stroke:
     the repair then went there first and turned the corner to its own stroke, an L-shaped trip (2026-11-07). The wipe is the last
     XY move of the block, the dish centre its first."""
+    if any(l.startswith("; CUP ") for l in block):     # a cup of the palette: its wipe is on its own rim, towards the paper
+        return block
     xy = [i for i, l in enumerate(block) if l.startswith("G0 X")]
     if len(xy) < 2:
         return block
@@ -3267,6 +3683,12 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
             continue
         counts[layer] = int(sel.sum())
         out.append(f"; ----- {layer}: {len(strokes)} gap strokes -----")
+        if cfg.get("rinse") and len(layers_r) > 1:                 # several colours: a clean brush before each (rinse.py)
+            dxy = next((tuple(float(v) for v in re.findall(r"[XY](-?[\d.]+)", l)[:2]) for l in dip
+                        if l.startswith("G0") and " X" in l and " Y" in l), None)
+            if dxy:
+                import rinse as RN
+                out += RN.gcode(cfg["rinse"], contact, dxy, feed_t)
         for b in range(0, len(strokes), 8):
             out.append(f"; {layer} batch {b // 8 + 1}")
             t0 = strokes[b][0]
@@ -3666,6 +4088,271 @@ class Photos:
                 machine.flush_motion()
 
 
+class BrushCheck:
+    """IS THERE PAINT ON THE BRUSH? (color_paint passes from the 12-cup palette, COLOR_BRUSH_CHECK_EVERY.) After the first
+    dip of the job, after every COLOR_BRUSH_CHECK_EVERY-th dip, and after the dip that follows a faint one, the head parks out
+    of view and the camera compares the first stroke painted after that dip with the photo from before the pass. When it
+    changed the sheet less than COLOR_BRUSH_CHECK_MIN of what this paint should do there (JOB_INFO["coat"]: t, r), the
+    brush was too dry: that cup is dipped CUP_DEEPER_STEP_MM deeper - at once (the dips still to come in this job too) and
+    remembered in cups.json - and the brush dips again and paints that stroke once more. No marks off the picture.
+    TOO HIGH OR TOO DRY? (2026-11-17: the brush had paint but touched too lightly, and it went deeper into the cup.) A dry
+    brush paints the start of the stroke and fades; a brush too high leaves its shallow parts (or the whole stroke, evenly)
+    faint. So: fading = too dry (deeper dip); otherwise the brush first goes COLOR_BRUSH_LOWER_MM lower for the rest of this
+    job (at most COLOR_BRUSH_LOWER_MAX_MM) and paints the stroke again, and only when it is still faint after that, the
+    deeper dip."""
+
+    def __init__(self, cfg, table, cmds, photos):
+        self.cfg, self.table, self.cmds, self.photos = cfg, table, cmds, photos
+        self.every = int(getattr(S, "COLOR_BRUSH_CHECK_EVERY", 0) or 0)
+        self.min_ratio = float(getattr(S, "COLOR_BRUSH_CHECK_MIN", 0.35))
+        coat = (JOB_INFO or {}).get("coat")
+        self.cup_n = (JOB_INFO or {}).get("cup")
+        self.cup = next((c for c in (cfg.get("cups") or {}).get("cups", []) if c["n"] == self.cup_n), None)
+        self.on = bool(self.every > 0 and coat and self.cup is not None and photos is not None and photos.first is not None)
+        if not self.on:
+            return
+        self.t, self.r = np.array(coat["t"], float), np.array(coat["r"], float)
+        self.extra = 0.0                                     # mm deeper than the G-code's dips (found faint in this job)
+        # mm lower than the G-code's painting moves (brush too high): found in an earlier pass of this run, kept in cups.json
+        self.lower = float((cfg.get("cups") or {}).get("lower", 0.0) or 0.0)
+        self.min_exp = float(getattr(S, "COLOR_BRUSH_CHECK_MIN_EXP", 0.06))
+        self.lowered_last = False                            # the last faint stroke was answered by lowering the brush
+        self.force_next = False
+        self.at = None
+        self.strokes = self._first_strokes()
+        self.done = set()
+        if self.lower > 0:
+            print(f"brush check: the brush goes {self.lower:.1f} mm lower than planned (found too high earlier in this run)")
+        print(f"brush check: the camera looks at the first stroke after dip 1 and every {self.every}th dip "
+              f"(cup {self.cup_n}; faint = under {100 * self.min_ratio:.0f}% of what the paint should do)")
+
+    @staticmethod
+    def _lin(img):
+        v = img.astype(np.float32) / 255.0
+        return cv2.GaussianBlur(np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4), (0, 0), 1.5)
+
+    def _first_strokes(self):
+        """dip number -> (index of the stroke's travel line, index of its STROKE END, its painted points in mm where the paint
+        lands): of the first strokes of at least 5 mm after each dip, the first where this paint must clearly show (expected
+        change >= COLOR_BRUSH_CHECK_MIN_EXP; 2026-11-18: over its own colour nothing shows, and the check said OK). Only the
+        pass's own paint: the swatches of other cups are left alone (2026-11-17: the magenta swatch was judged as black,
+        found "faint", and painted over with black)."""
+        z_low, cand = float(self.cfg["z_low"]), {}
+        to = self.cfg.get("tool_offset") or (0.0, 0.0)
+        last_g0, pts, start = None, [], None
+        for i, (cmd, _layer, dips, end) in enumerate(self.table):
+            if str(_layer).startswith("test "):                  # another cup's swatch
+                pts, start = [], None
+                continue
+            if len(cand.get(dips, [])) >= 4:
+                continue
+            if cmd.startswith("G0") and " X" in cmd and start is None:   # the travel to a stroke (not its lift at the end)
+                last_g0, pts = i, []
+            m = re.match(r"G1 X(-?[\d.]+) Y(-?[\d.]+) Z(-?[\d.]+)", cmd)
+            if m and float(m.group(3)) < z_low - 0.05:
+                start = last_g0 if start is None else start
+                pts.append((float(m.group(1)) + to[0], float(m.group(2)) + to[1], float(m.group(3))))
+            if end is not None:
+                if start is not None and len(pts) >= 10:
+                    cand.setdefault(dips, []).append((start, i, np.array(pts)))
+                pts, start = [], None
+        out = {}
+        for d, lst in cand.items():
+            for st in lst:
+                try:
+                    e = self.expected(st[2])
+                except Exception:
+                    e = None
+                if e is not None and e >= self.min_exp:
+                    out[d] = st
+                    break
+        return out
+
+    def expected(self, pts):
+        """The median change one coat of this paint should make along these points (the photo from before the pass)."""
+        import vision as V
+        px = V.mm_to_px_array(self.photos.H_inv, pts[:, :2]).astype(np.float32)
+        b_img = self._lin(self.photos.first)
+        b = cv2.remap(b_img, px[:, 0].reshape(1, -1), px[:, 1].reshape(1, -1), cv2.INTER_LINEAR)[0]
+        white = np.percentile(b_img.reshape(-1, 3), 98, axis=0)
+        b = b / np.maximum(white, 1e-3)
+        return float(np.median(np.linalg.norm(b * (self.t - 1.0) + self.r, axis=1)))
+
+    def transform(self, line):
+        """The dips still to come in this job go `extra` deeper: the move down into the paint over THIS job's cup (the G-code
+        sent has no comments, so it is known by where the head is and how low it goes), never under CUP_DIP_END_MM."""
+        if not self.on:
+            return line
+        if line.startswith(("G0", "G1")):
+            tok = dict(re.findall(r"([XYZ])(-?[\d.]+)", line))
+            if "X" in tok and "Y" in tok:
+                self.at = (float(tok["X"]), float(tok["Y"]))
+                if (self.lower > 0 and line.startswith("G1") and "Z" in tok
+                        and float(tok["Z"]) < float(self.cfg["z_low"]) - 0.05
+                        and math.dist(self.at, self.cup["xy"]) >= 25.0):          # a painting move: the brush lower
+                    return re.sub(r"Z-?[\d.]+", f"Z{float(tok['Z']) - self.lower:.3f}", line, count=1)
+            elif (self.extra > 0 and "Z" in tok and self.at is not None
+                  and math.dist(self.at, self.cup["xy"]) < 25.0):
+                import cups as CUPS
+                floor = CUPS.heights(self.cfg["z_paint"])["floor"]
+                z = float(tok["Z"])
+                if floor - 0.01 <= z <= floor + 12.0:          # down into the paint (the rim and the wipe are higher)
+                    z2 = max(floor + float(getattr(S, "CUP_DIP_END_MM", 0.5)), z - self.extra)
+                    return re.sub(r"Z-?[\d.]+", f"Z{z2:.3f}", line, count=1)
+        return line
+
+    def due(self, i):
+        """Line i (1-based) ends a stroke that is checked."""
+        if not self.on:
+            return None
+        dips = self.table[i - 1][2]
+        hit = self.strokes.get(dips)
+        if hit is None or hit[1] != i - 1 or dips in self.done:
+            return None
+        if dips == 1 or (self.every and dips % self.every == 0) or self.force_next:
+            return dips
+        return None
+
+    def ratio(self, pts):
+        """How much the stroke changed the sheet, as a share of what one coat of this paint should change there: (all of it,
+        its first third, its last third, its deeper half, its shallower half) - None where there is nothing to judge."""
+        zs = pts[:, 2]
+        pts = pts[:, :2]
+        import vision as V
+        frame = self.photos._frame(settle=0.3)
+        px = V.mm_to_px_array(self.photos.H_inv, pts).astype(np.float32)
+        b_img, a_img = self._lin(self.photos.first), self._lin(frame)
+        samp = lambda im, p: cv2.remap(im, p[:, 0].reshape(1, -1), p[:, 1].reshape(1, -1), cv2.INTER_LINEAR)[0]
+        poly = np.array(self.photos.paper_poly, np.float32) if self.photos.paper_poly is not None else None
+        if poly is not None:                                     # the light now vs then, on the bare edge of the sheet
+            c = poly.mean(axis=0)
+            ring = np.vstack([c + 0.95 * (poly[k] + (poly[(k + 1) % 4] - poly[k]) * s - c)
+                              for k in range(4) for s in np.linspace(0, 1, 30)]).astype(np.float32)
+            gain = np.median(samp(b_img, ring), axis=0) / np.maximum(np.median(samp(a_img, ring), axis=0), 1e-3)
+            white = np.percentile(samp(b_img, ring), 75, axis=0)
+        else:
+            gain, white = np.ones(3), np.percentile(b_img.reshape(-1, 3), 98, axis=0)
+        b = samp(b_img, px) / np.maximum(white, 1e-3)
+        # the change, the strongest within ~1 mm of the line: a thin stroke read a mm beside it is not "faint"
+        x0, y0 = np.maximum(px.min(axis=0) - 20, 0).astype(int)
+        x1, y1 = (px.max(axis=0) + 20).astype(int)
+        d_img = np.linalg.norm((a_img[y0:y1, x0:x1] * gain - b_img[y0:y1, x0:x1]) / np.maximum(white, 1e-3), axis=2)
+        seg = np.linalg.norm(np.diff(px, axis=0), axis=1).sum() / max(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum(), 1e-6)
+        k = max(3, int(round(2.0 * seg)) | 1)                     # ~2 mm across, in camera pixels
+        d_img = cv2.dilate(d_img.astype(np.float32), np.ones((k, k), np.uint8))
+        act = samp(d_img, px - np.array([x0, y0], np.float32))
+        exp = np.linalg.norm(b * (self.t - 1.0) + self.r, axis=1)
+        ok = exp > 0.04
+        if ok.sum() < 5:
+            return None                                          # this paint hardly shows here: nothing to judge
+        e = float(np.median(exp[ok]))
+        part = lambda sel: float(np.median(act[ok & sel]) / e) if (ok & sel).sum() >= 3 else None
+        n = len(act)
+        deep = zs <= np.median(zs) if float(zs.max() - zs.min()) > 0.05 else None
+        return (float(np.median(act[ok]) / e), part(np.arange(n) < n / 3.0), part(np.arange(n) >= 2 * n / 3.0),
+                part(deep) if deep is not None else None, part(~deep) if deep is not None else None)
+
+    def check(self, machine, i, dips, preview=None):
+        """At the end of the stroke of dip `dips`: photo, and a fresh, deeper dip + that stroke again when it was faint."""
+        start, end, pts = self.strokes[dips]
+        self.done.add(dips)
+        self.force_next = False
+        try:
+            go_to_snapshot(machine, self.cfg, settle=float(getattr(S, "STROKE_PHOTO_SETTLE_S", 0.4)))
+            got = self.ratio(pts)
+        except Exception as e:
+            print(f"   (brush check not done: {e})")
+            got = None
+        q = None if got is None else got[0]
+        if q is None or q >= self.min_ratio:
+            self.lowered_last = False
+            if q is not None:
+                print(f"   brush check after dip {dips}: the stroke did {100 * q:.0f}% of what the paint should - OK")
+            if self.photos.xy is not None:
+                machine.send_line(f"G0 X{self.photos.xy[0]:.3f} Y{self.photos.xy[1]:.3f} F{self.cfg['feed']}", timeout=60)
+            return
+        _, q_start, q_end, q_deep, q_shallow = got
+        m = self.min_ratio
+        fades = q_start is not None and q_end is not None and q_start >= m and q_end < 0.6 * q_start
+        high = q_deep is not None and q_shallow is not None and q_deep >= m and q_shallow < m
+        step_z = float(getattr(S, "COLOR_BRUSH_LOWER_MM", 0.2))
+        can_lower = step_z > 0 and self.lower + step_z <= float(getattr(S, "COLOR_BRUSH_LOWER_MAX_MM", 0.6)) + 1e-6
+        if can_lower and not fades and (high or not self.lowered_last):
+            self.lower += step_z
+            try:
+                import cups as CUPS
+                cs_ = CUPS.load()
+                if cs_:
+                    cs_["lower"] = round(self.lower, 2)
+                    CUPS.save(cs_)
+                (self.cfg.get("cups") or {})["lower"] = round(self.lower, 2)
+            except Exception as e:
+                print(f"   (the lower brush not remembered: {e})")
+            self.lowered_last, self.force_next = True, True
+            print(f"\n   BRUSH CHECK after dip {dips}: the stroke did only {100 * q:.0f}% of what {layer_label('')} should, "
+                  + ("its deep part fine, its shallow part faint" if high else "evenly faint")
+                  + f" - the brush TOO HIGH: {self.lower:.1f} mm lower for the rest of this pass, and that stroke again.")
+            for ln in self.cmds[start:end + 1]:
+                ln = ln.strip()
+                if ln and not ln.startswith(";"):
+                    ln = znudge_line(self.transform(ln))
+                    machine.send_line(ln)
+                    if self.photos is not None:
+                        self.photos.seen(ln)
+            return
+        self.lowered_last = False
+        import cups as CUPS
+        step = float(getattr(S, "CUP_DEEPER_STEP_MM", 1.0))
+        msg = CUPS.go_deeper(self.cup_n)                       # remembered for the next jobs
+        cs = self.cfg["cups"]
+        cs.setdefault("deeper", {})[str(self.cup_n)] = round(float(cs.get("deeper", {}).get(str(self.cup_n), 0.0)) + step, 2)
+        self.extra += step
+        self.force_next = True                                 # the next dip is checked too
+        print(f"\n   BRUSH CHECK after dip {dips}: the stroke did only {100 * q:.0f}% of what {layer_label('')} should"
+              + (" (strong at its start, fading)" if fades else "") + f" - too little paint on the brush. Cup {self.cup_n}: "
+              f"{msg}. A fresh dip, and that stroke again.")
+        k = int((self.cfg.get("cup_dips_planned") or {}).get(self.cup_n, 0))
+        lines, _ = CUPS.dip_gcode(cs, self.cup, self.cfg["z_paint"], k, self.cfg["feed"], self.cfg["wipe_feed"],
+                                  start_xy=tuple(self.cfg["snapshot"]), z_low=self.cfg["z_high"])
+        if self.cfg.get("cup_dips_planned") is not None:
+            self.cfg["cup_dips_planned"][self.cup_n] = k + 1
+        for k_, ln in enumerate(lines + self.cmds[start:end + 1]):
+            ln = ln.strip()
+            if ln and not ln.startswith(";"):
+                if k_ >= len(lines):
+                    ln = znudge_line(self.transform(ln))       # (the brush as low as found right, and your correction)
+                machine.send_line(ln)
+                if self.photos is not None:
+                    self.photos.seen(ln)
+
+
+ZNUDGE = [None, 0.0, None]          # [your correction mm, when read, this job's paper height (moves below it are strokes)]
+
+
+def znudge_line(line):
+    """YOUR Z CORRECTION (znudge.py, z_nudge.json), read again every 2 s so it can be changed while a job runs: the moves on
+    the paper (below the travel height; the dips, the rinse and the travel are all higher) go that much deeper / higher.
+    znudge_line(None) reads it now and returns it."""
+    try:
+        import znudge as ZN
+    except Exception:
+        return line if line is not None else 0.0
+    if line is None or time.time() - ZNUDGE[1] > 2.0:
+        v_ = ZN.read()
+        if line is not None and ZNUDGE[0] is not None and abs(v_ - ZNUDGE[0]) > 1e-9:
+            print(f"\nznudge: now the brush {ZN.say(v_)}")
+        ZNUDGE[0], ZNUDGE[1] = v_, time.time()
+        if line is None:
+            return v_
+    dz, zp = ZNUDGE[0] or 0.0, ZNUDGE[2]
+    if abs(dz) < 1e-9 or zp is None or not line.startswith(("G0", "G1")) or "Z" not in line:
+        return line
+    m_ = re.search(r"Z(-?[\d.]+)", line)
+    if m_ and float(m_.group(1)) < zp:
+        line = line[:m_.start()] + f"Z{max(0.2, float(m_.group(1)) + dz):.3f}" + line[m_.end():]
+    return line
+
+
 def stream_gcode(machine, code, cfg, preview=None, checker=None, photos=None):
     """Sends the G-code line by line and waits for the machine's 'ok' each time. Ctrl+C lifts the brush and stops.
     With a checker (check.py): every line passes through it (the Z of the strokes follows the learned depth map), at every dip the camera looks at the
@@ -3676,6 +4363,11 @@ def stream_gcode(machine, code, cfg, preview=None, checker=None, photos=None):
     vprint(f"sending {total} G-code lines to the machine. Ctrl+C stops it (the brush is lifted first).")
     prev_layer, prev_dips = "", 0
     prev_photo_dips = 0
+    try:
+        brush = BrushCheck(cfg, table, cmds, photos)          # is there paint on the brush? (color_paint passes)
+    except Exception as e:
+        print(f"(brush check off: {e})")
+        brush = None
     if checker is not None:
         try:
             checker.begin(machine)
@@ -3700,6 +4392,11 @@ def stream_gcode(machine, code, cfg, preview=None, checker=None, photos=None):
                 snap_at.add(i)
         print(f"stroke photos: {len(snap_at)} (one per {'stroke' if mode == 'stroke' else 'leaf'}; about "
               f"{len(snap_at) * float(getattr(S, 'STROKE_PHOTO_SECONDS', 5.0)) / 60:.0f} min more)")
+    ZNUDGE[:] = [None, 0.0, float(cfg["z_low"]) - 0.05]     # your Z correction (znudge.py): this job's paper height
+    v0_ = znudge_line(None)
+    if abs(v0_) > 1e-9:
+        import znudge as ZN
+        print(f"znudge: the brush {ZN.say(v0_)} (python znudge.py ... to change it, also while this runs)")
     try:
         for i, line in enumerate(cmds, 1):
             if photos is not None and table[i - 1][2] != prev_photo_dips:
@@ -3715,6 +4412,9 @@ def stream_gcode(machine, code, cfg, preview=None, checker=None, photos=None):
                 prev_layer, prev_dips = layer, dips
                 checker.layer = layer
                 line = checker.transform(line)
+            if brush is not None:
+                line = brush.transform(line)
+            line = znudge_line(line)
             machine.last_error = None
             machine.send_line(line)
             if photos is not None:
@@ -3723,6 +4423,10 @@ def stream_gcode(machine, code, cfg, preview=None, checker=None, photos=None):
                 preview.update(i, table[i - 1][1], table[i - 1][2], cum[i - 1])
             if i in snap_at:
                 photos.snap(machine)
+            if brush is not None:
+                d_ = brush.due(i)
+                if d_ is not None:
+                    brush.check(machine, i, d_, preview)
             if getattr(machine, "last_error", None) and line.startswith(("G0", "G1")):
                 print(f"\nthe machine refused a move ({machine.last_error}) at line {i}: {line} - stopping")
                 machine.send_line(f"G0 Z{cfg['z_high']:.3f} F3000")
@@ -3774,14 +4478,25 @@ def place_on_paper(args, cfg):
             vprint(f"camera picture taken {cfg['photo_time']}" + ("" if live else
                   "  - WARNING: the camera delivered identical frames (frozen or old picture)! Close other programs using the camera, "
                   "unplug/replug it and run again"))
-        det = PP.detect_paper(frame, H, H_inv, calib_mm=cal["mm_pts"])
-        if det is None:
-            sys.exit("no paper found in the picture (is the toolhead in view, or the dots not on the paper?)")
-        if min(det["size_mm"]) < 50.0:
-            sys.exit(f"the paper found is only {det['size_mm'][0]:.0f} x {det['size_mm'][1]:.0f} mm: that is not the sheet "
-                     f"(look at paper_frame.png - is the paper in view and lit, with nothing white and bigger beside it?)")
-        det = PP.clip_to_reach(det)
-        pf = PP.paper_frame(det, H)
+        keep = getattr(args, "paper_keep", None)
+        if keep and os.path.isfile(keep):
+            # a run of several passes on ONE sheet (color_paint.py): the paper found before the first pass, not again on a
+            # painted sheet - once most of it was coloured, the detection saw only the white rest (193 x 129 mm instead of
+            # 297 x 210) and the passes were painted 37 mm small (2026-11-13). The photo is still taken: dishes, rinse
+            det, pf = PP.load_paper(keep)
+            print(f"paper: the sheet found before the first pass is used ({keep}), not detected again")
+        else:
+            det = PP.detect_paper(frame, H, H_inv, calib_mm=cal["mm_pts"])
+            if det is None:
+                sys.exit("no paper found in the picture (is the toolhead in view, or the dots not on the paper?)")
+            if min(det["size_mm"]) < 50.0:
+                sys.exit(f"the paper found is only {det['size_mm'][0]:.0f} x {det['size_mm'][1]:.0f} mm: that is not the sheet "
+                         f"(look at paper_frame.png - is the paper in view and lit, with nothing white and bigger beside it?)")
+            det = PP.clip_to_reach(det)
+            pf = PP.paper_frame(det, H)
+            if keep:
+                PP.save_paper(det, pf, keep)
+                print(f"paper: found {det['size_mm'][0]:.0f} x {det['size_mm'][1]:.0f} mm, kept for the next passes ({keep})")
     else:
         det, pf = PP.load_paper(args.paper)
     iw, ih = Image.open(args.input).size
@@ -3791,7 +4506,8 @@ def place_on_paper(args, cfg):
         _, sh = SG.block_size_mm(S.SIGNATURE, float(S.SIGN_WIDTH_MM), bool(getattr(S, "SIGN_YEAR", True)),
                                  year_h_mm=float(getattr(S, "SIGN_YEAR_MM", 4.0)))
         bottom = float(S.SIGN_GAP_MM) + sh + float(S.SIGN_EDGE_MM)
-    pl = PP.fit_artwork(pf, iw, ih, margin_mm=args.margin, rotate=args.rotate, width_mm=args.width, bottom_mm=bottom)
+    pl = PP.fit_artwork(pf, iw, ih, margin_mm=args.margin, rotate=args.rotate, width_mm=args.width, bottom_mm=bottom,
+                        top_mm=TEST_ROOM_MM or None)
     cfg["placement"], cfg["target_width"], cfg["rotate"], cfg["paper_frame"] = pl, pl["width_mm"], pl["rotate"], pf
     vprint(f"paper: {det['size_mm'][0]:.0f} x {det['size_mm'][1]:.0f} mm (usable {pf['paper_w']:.0f} x {pf['paper_h']:.0f}), "
           f"tilt {pf['angle_deg']:.1f} deg")
@@ -3815,6 +4531,16 @@ def unused_settings():
     except OSError:
         return []
     return [n for n in dict.fromkeys(names) if n != "BASE_DIR" and not re.search(r"\b" + n + r"\b", code)]
+
+
+SCENE_KEEP = None          # --scene_keep: the dishes and the rinse container of the first pass, reused (color_paint.py)
+LAST_JOB_DONE = False      # True once a job (main) has painted to its end: stops, failed probes, N answers leave it False
+JOB_INFO = None            # color_paint: what this job is, for the overlay and the live preview: {"label": "opaque magenta",
+                           # "bgr": (b, g, r), "cup": 2, "kind": "opaque", "status": "PASS 5 ...", "chips": [(bgr, text)],
+                           # "de": [dE before each pass], "infill": "bands", "smooth": 4.0}. None = a plain job
+TEST_STROKES = []          # color_paint: test strokes in the strip over the picture, [{"label", "bgr", "cup" (None = the job's own
+                           # paint: painted first after its first dip), "slot", "n"}] (test_line: where it goes)
+TEST_ROOM_MM = 0.0         # color_paint: room kept over the picture's top for those strokes (fit_artwork top_mm)
 
 
 def main(argv=None):
@@ -3866,10 +4592,20 @@ def main(argv=None):
                     "parks, the camera looks at the new strokes, a depth map is learned and missing strokes are painted again at the end of a layer. See check.py")
     ap.add_argument("--no_check", action="store_true", help="no touch check (the default; only needed when CHECK = True in settings.py)")
     ap.add_argument("--probe_file", help="use the result of an earlier  python probe.py  run (probe_result.json) instead of painting probes now")
+    ap.add_argument("--probe_max_age_h", type=float, default=6.0,
+                    help="a --probe_file older than this (hours) is not used (color_paint: the run's own probe, longer)")
     ap.add_argument("--force_probe_file", action="store_true", help="use a --probe_file even if it does not fit this sheet (paper moved, too old). Not recommended")
     ap.add_argument("--unmeasured", action="store_true", help="if the probes were painted but gave no usable result, paint the job anyway with the settings / profile contact. "
                     "Not recommended: the depth can be far off. Without it the job STOPS and paints nothing more")
     ap.add_argument("--no_preview", action="store_true", help="no live camera window while painting (it is there for screen recording)")
+    ap.add_argument("--scene_keep", help="a run of passes on one sheet: the paint dishes and the rinse container are found once "
+                    "and saved to this file, later passes load them (no new detection that could go wrong)")
+    ap.add_argument("--cup", type=int, default=None,
+                    help="dip ONLY into this cup of the 12-cup palette (its number, cups.py show) - color_paint.py gives every pass its cup")
+    ap.add_argument("--cups", choices=["any", "opaque", "transparent"], default=None,
+                    help="which cups of the 12-cup palette this job dips into (default CUP_KIND in settings.py)")
+    ap.add_argument("--paper_keep", help="a run of passes on one sheet: the paper is detected once and saved to this file, "
+                    "later passes load it (the camera photo is still taken for the dishes)")
     ap.add_argument("--paper", default="auto", help="auto (default) = photograph the paper now; paper.json = saved earlier; none = old mama.py offsets, no camera")
     ap.add_argument("--frame", help="use this saved camera picture instead of the camera (implies --plan_only)")
     ap.add_argument("--margin", type=float, default=10.0, help="empty paper all round, mm (default 10)")
@@ -3883,6 +4619,8 @@ def main(argv=None):
     ap.add_argument("--h4xx0r", action="store_true", help="the h4xx0r theme of ../brushograph's WebUI: a green phosphor terminal "
                     "and a live preview behind dirty glass (or H4XX0R = True in settings.py)")
     a = ap.parse_intermixed_args(argv)                                   # file names and options in any order
+    global SCENE_KEEP
+    SCENE_KEEP = a.scene_keep
     if a.h4xx0r or getattr(__import__("settings"), "H4XX0R", False):
         import h4xx0r
         h4xx0r.enable()
@@ -3945,6 +4683,8 @@ def main(argv=None):
         return
     out = a.output or (a.input.rsplit(".", 1)[0] + ".gcode")
     cfg = default_config()
+    cfg["cup_kind"] = a.cups or getattr(S, "CUP_KIND", "any")
+    cfg["cup_force"] = a.cup
     cfg["color"], cfg["tol"] = a.color, a.tol
     for k, v in (("target_width", a.width), ("brush_w", a.brush), ("overlap", a.overlap), ("infill_type", a.infill),
                  ("infill_angle", a.angle), ("simplify_mm", a.simplify), ("min_dist", a.dip_min), ("max_dist", a.dip_max)):
@@ -4017,7 +4757,7 @@ def main(argv=None):
             same_sheet = None if (a.probe_file or a.probe) else PB.reusable_result(det, frame)
             if a.probe_file:
                 res = PB.load_result(a.probe_file)
-                PB.check_result_fresh(res, det, force=a.force_probe_file)
+                PB.check_result_fresh(res, det, max_age_h=a.probe_max_age_h, force=a.force_probe_file)
             elif same_sheet:
                 # this sheet was probed already (same place, today): new lines would only repaint the old marks
                 res = same_sheet
@@ -4131,6 +4871,12 @@ def main(argv=None):
                     photos.make_gif()
                     photos.make_stroke_video()
             if done:
+                rinse_at_end(machine, cfg)
+                if cfg.get("cup_dips_planned"):                # the paint level in those cups sank: their next dips go deeper
+                    import cups as CUPS
+                    CUPS.add_dips(cfg["cup_dips_planned"])
+                global LAST_JOB_DONE
+                LAST_JOB_DONE = True                           # a wrapper (color_chart / color_stack) checks this before its next pass
                 print("\nfinished.")
                 if preview is not None:
                     print("(live window stays for a few seconds - Q closes it)")
