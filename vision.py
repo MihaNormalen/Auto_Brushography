@@ -71,6 +71,12 @@ def _open_camera_once(index=CAMERA_INDEX, width=CAMERA_WIDTH, height=CAMERA_HEIG
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        import settings as _S                         # (2026-11-21) the camera's own zoom / pan / tilt, set every time: another
+        for prop, key in ((cv2.CAP_PROP_ZOOM, "CAMERA_ZOOM"), (cv2.CAP_PROP_PAN, "CAMERA_PAN"),   # app (the Windows Camera)
+                          (cv2.CAP_PROP_TILT, "CAMERA_TILT")):                                  # can change them, and the
+            v = getattr(_S, key, None)                                                           # picture moves like a bumped camera
+            if v is not None:
+                cap.set(prop, float(v))
         if CAMERA_SET_EXPOSURE:
             cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)   # manual (DSHOW)
             cap.set(cv2.CAP_PROP_EXPOSURE, CAMERA_EXPOSURE)

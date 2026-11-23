@@ -15,7 +15,9 @@ BASE_DIR = Path(__file__).resolve().parent            # files are always found n
 
 
 # =============================== 1. HEIGHTS ==========================================================
-TOUCH_Z = 6.0                # 2026-11-01: brush re-mounted, touches at Z 4 (by hand; the probe said 4.09). Was ~6.1 (2026-10-28)
+TOUCH_Z = 0.0                # Z 0 = the Z switch = the brush touches the paper (the probe measures the real touch every run)
+Z_MIN_MM = -6.0              # the lowest Z the program ever sends (below the touch); the axis has ~15 mm below the switch
+Z_CONTROLLER_SHIFT_MM = 15.0  # (2026-11-21) the controller allows only Z 0..50 (M211): every Z is sent + this (and M206 sets its switch to it). Our Z range: -15 .. +35. 0 = off
 #   machine Z where the brush tip touches the paper (rough). TRAINING: the ladder starts 0.5 mm above it and goes
 #   down to machine Z 0.2. PAINTING: used only when there is NO brush profile; with a profile the measured contact is used.
 
@@ -74,7 +76,7 @@ ARTWORK = None             # e.g. "PoletnaModra.png": then you can run  python p
 OUTPUT = None              # e.g. "out.gcode"  (None = the artwork's name + .gcode)
 ARTWORK_WIDTH_MM = None    # None = as large as fits on the paper
 ROTATE = "auto"            # "auto" = the artwork is turned by 90 degrees when it then fits larger (landscape art on portrait paper), 0 = never, 90 = always
-H4XX0R = True             # True = every program in the h4xx0r theme (the same as --h4xx0r: paint, preview, calibrate*)
+H4XX0R = False            # (2026-11-21: off for now, kept) True = every program in the h4xx0r theme (the same as --h4xx0r: paint, preview, calibrate*)
 SIGNATURE = "podpis2.png"  # painted FIRST (right after the probes), in the bottom margin under the artwork's right edge. None = no signature
 SIGN_PAINT = True          # False = the signature's room is kept (the artwork is placed the same) but it is not painted: color_paint.py
                            # paints it only in its LAST pass, so all passes of one sheet sit in the same place
@@ -93,7 +95,8 @@ SIGN_YEAR_MM = 6.0        # height of the year. 4 mm came out as dashes with thi
 
 # color_paint.py (glazes): NO fixed number of passes. Before every pass the dry sheet is photographed and the pass that brings
 # the painting nearest to the picture is chosen (which paint, where); it goes on until another pass would hardly help.
-COLOR_MAX_PASSES = 40      # at most this many passes, fill-ins not counted (one pass with its drying is about 45-70 min). 2026-11-16: 20 -> 40,
+COLOR_MAX_PASSES = 0       # (2026-11-23, user: "it ends when it is done, not after a number of passes": 40 -> 0 = NO LIMIT;
+                           # the end is COLOR_END_NO_BEST + the finish) at most this many passes, fill-ins not counted (one pass with its drying is about 45-70 min). 2026-11-16: 20 -> 40,
                            # only a safety net now: the run ends when the camera sees no more progress (COLOR_STOP_PATIENCE). (2026-11-15: 12 -> 20, the run of 13:18 stopped at 12 while passes still helped 0.5-0.6)
 COLOR_MAX_COATS = 6        # at most this many coats of one paint on any spot (2026-11-13: one coat of the black took only ~10% of the light)
 COLOR_STOP_GAIN = 0.25     # (2026-11-15: 0.4 -> 0.25) the end: when the best next pass would bring the painting less than this much nearer to the picture
@@ -122,6 +125,9 @@ COLOR_WET_MARGIN_MM = -1.0   # the bare paper and older, dry parts first; < 0: a
                            # so the shapes touch (2026-11-18: +2 mm left white lines between them); > 0: keep this far away
 COLOR_RECENT_WEIGHT = (0.25, 0.6)  # spots painted in the last pass / the one before count this much when ranking passes
 COLOR_NO_WAIT = True       # (2026-11-18) a pass that touches none of the last pass's area (plus COLOR_WET_MARGIN_MM) goes on at once:
+COLOR_NO_WAIT_GAP_MM = 1.5  # (2026-11-22) ... the wet area grown by this: wet never meets wet (no run, no mud)
+COLOR_NO_WAIT_SHARE = 0.3  # ... when the best pass would touch wet paint: the best pass on dry or bare paper goes on at once,
+                           # if it brings at least this share of the best (user: "paint elsewhere while it dries")
 COLOR_NO_WAIT_CHAIN = 2    # no drying, no photo, at most this many in a row; they are measured together at the next photo
                              # best one, the preferred order picks (lighter / covering first, whites last); higher = the best one
 COLOR_LOOK_AHEAD = 2       # choosing a pass: every spot looks this many coats of each paint ahead (green = yellow AND cyan)
@@ -130,8 +136,10 @@ COLOR_LOOK_AHEAD = 2       # choosing a pass: every spot looks this many coats o
 # per stage its smoothing and its infill style. Passes 1-4: broad areas (4 mm smoothing, long bands), 5-8: 2 mm, from 9: the
 # detail (1 mm, centre-line strokes for edges and features). A single number / name instead of a tuple = the same for all.
 COLOR_STAGE_FROM = (1, 5, 9)
-COLOR_STAGE_DE = (None, 26.0, 17.0)  # (2026-11-18) ... and a stage only once the sheet is that near the picture (the best dE so far):
+COLOR_STAGE_DE = (None, 30.0, 25.0)  # (2026-11-18) ... and a stage only once the sheet is that near the picture (the best dE so far):
                            # middle at dE 26, detail at 17 - the structure first, details only when it is there (details came at dE 21 as blobs)
+                           # 2026-11-22: 26/17 -> 30/25: the portrait stalled at dE ~27 in the BROAD stage after 8 passes,
+                           # never reaching the detail (no articulation); user agreed to loosen it
 COLOR_FOCUS_WEIGHT = (0.0, 1.0, 2.0)  # (Butina) per stage: the faces (found in the picture) and strong contrasts count 1 + this when ranking
 COLOR_CRISP_EDGES = True   # (Butina) near the picture's sharp light-dark breaks a pass follows the wanted spots exactly (not the smoothed outline)
 COLOR_EDGE_DL = 8.0        # ... a break = the lightness changes by more than this per mm
@@ -147,7 +155,7 @@ COLOR_TRY_GAP = 2          # ... at least this many passes between two tries
 COLOR_TEST_DENSITY_SCALE = 3.0  # (2026-11-20) deciding whether to TRY a glaze known only from its test stroke: it may be this
                            # many times as strong (optical density) - test strokes read glazes 3-6x too weak (run H: cyan never
                            # painted). The run measures its own from the paints with a test stroke AND a pass. Its pass then counts
-COLOR_WHITE_PER_STAGE = 1  # (2026-11-20) at most this many white passes per stage (run H: 3 whites on 45% - milky, no glaze over it)
+COLOR_WHITE_PER_STAGE = 99  # (2026-11-23: 1 -> 99 = no limit, user: white wherever it belongs) (2026-11-20) at most this many white passes per stage (run H: 3 whites on 45% - milky, no glaze over it)
 COLOR_EYE_BLUR_PX = 0.8    # (2026-11-19) the camera photo is blurred only this much (camera px, against noise); it was 2 px + 2 grid px:
 COLOR_EYE_GRID_BLUR = 0.0  # ... ~2-3 mm, white holes unseen, black believed mid grey. This: an extra blur on the planning grid (0 = none)
 COLOR_LEARN_LANDED = True  # a pass's paint is learned where it landed (changed at least half the most), not from the gaps between strokes
@@ -161,15 +169,63 @@ COLOR_GLAZE_OVERRIDES = {}  # e.g. {"BAND_SPACING": 1.0, "PATCH_MAX_COVERED": 0.
                            # (2026-11-20) tested on run H passes 3 and 7: painted twice 36 -> 37%, 44 -> 45% - no help; the overlap
                            # is in the plan itself (side strokes at least one mark wide). A TRANSPARENT paint's pass would use these
 COLOR_HOLE_GROW_MM = 0.7   # ... the hole pass a little wider than the holes, so it touches what is round them
-COLOR_GLAZE_OVER_WHITE = 1.5  # a dry white's area counts this many times for a glaze (white lifts the value, the glaze over
+COLOR_HOLE_MIN_GAIN = 0.3  # (2026-11-22) ... and only when it brings at least this (dE); the run of 11-21 got stuck in 4 hole
+COLOR_HOLE_VS_REAL = 0.5   # ... passes of 0.05-0.15 each; and only when it brings at least this share of the best real pass
+                           # (that would have brought 2.7 on the 21% of the picture never painted)
+COLOR_GLAZE_OVER_WHITE = 1.5  # (2026-11-23: LIGHT glazes only - a dark glaze never goes on a fresh white, COLOR_DARK_AFTER_WHITE) a dry white's area counts this many times for a glaze (white lifts the value, the glaze over
                            # it brings the colour back: no milky picture); 1 = no preference
 COLOR_WHITE_ONLY_LIFTS = True  # the whites only where the sheet is darker than wanted (to lift the value), never to dull a
 COLOR_WHITE_LIFT_DL = 3.0  # ... colour (run G: milky); ... at least this much darker (L)
-COLOR_MASK_SMOOTH_MM = (4.0, 2.0, 1.0)  # color_paint: each pass's area is smoothed by this much (holes closed, frayed edges rounded) so strokes can be long; 0 = off (2026-11-15: pass 5 was a lace of 128 holes -> 7 mm strokes, a maze)
+# DEPTH PLANES (2026-11-22, color_planes.py, docs/depth_planes_comfyui.pdf): a depth map of the picture (Depth Anything V2 on
+# ComfyUI, the studio computer; kept in ko/comfy/<picture>_depth.png) sorted into planes far .. near. A pass's area is
+# smoothed INSIDE each plane (nothing filled across a plane border), by its own amount, and kept sharp along depth breaks.
+VOICE_ON = True            # (2026-11-22) voice.py: the Čopičograf speaks on the speakers (edge-tts, online); False = only printed
+VOICE = "en-US-AndrewNeural"  # ... the voice (warm, conversational, male); Slovene: "sl-SI-RokNeural" with VOICE_LANG "sl"
+VOICE_MIC = "USB Audio"    # voice_lab.py: the microphone (a part of its name: "USB Audio", "T89", "JBL"; None = Windows' default).
+                           # A Bluetooth headset's mic is 8 kHz phone sound: fine to talk, poor for training the voice
+VOICE_WHISPER = "small"    # ... speech to text on this computer: "small" (fast) or "medium" (better Slovene, slower)
+VOICE_HEAR_LANGS = ("sl", "en")  # ... the languages it listens for
+TALK_BRAIN = "ollama"      # talk.py: "ollama" = local, on the studio computer (no key, no cost); "claude" = Claude API (key)
+TALK_OLLAMA_URL = "http://100.115.80.121:11434"  # ... Ollama on domimik (OLLAMA_HOST=0.0.0.0 there)
+TALK_OLLAMA_MODEL = "gemma2:2b"  # ... the local model: gemma2:2b (1.6 GB, quick, simple); better: gemma2:9b (5.4 GB, fits 8 GB)
+TALK_OLLAMA_CTX = 8192     # ... its memory in tokens (the character sheet alone is ~4500)
+TALK_MODEL = "claude-opus-5-5"  # talk.py: the brain (Claude API, ANTHROPIC_API_KEY); "claude-haiku-5-5" = cheaper and faster
+TALK_EFFORT = "low"        # ... how much it thinks before answering (low = quick spoken answers)
+TALK_RECORD = True         # ... every sentence you say is also kept in ko/voice_dataset (for training your voice)
+VOICE_SL = "sl-SI-RokNeural"  # ... the voice for answers in Slovene
+PYLIBS = r"C:\py\pylibs" # the anthropic SDK is installed here (the Store Python's own folder is too long a path for it)
+PAINT_VOICE = False        # (2026-11-22, user: "throw it out") the painting says nothing (pass start, drying, cups, end)
+NARRATOR_ON = False       # (OFF, user) color_paint starts narrator_watch.py: the Čopičograf talks about what it does while it paints
+NARRATOR_EVERY_S = 150     # ... at most this often (seconds) about brushography; real events (halfway, the cup sinking) sooner
+VOICE_LANG = "en"          # ... the narrator's language: "en" or "sl" (the Slovene voices sounded stiff, 2026-11-22)
+VOICE_LOCAL = "Microsoft David Desktop"  # ... when the online voice does not answer: this computer's own (offline) voice
+VOICE_RATE = "-12%"        # ... speed: "-10%" slower, "+10%" faster (2026-11-22, user: talks too fast)
+COMFY_URL = "http://100.115.80.121:8188"  # ComfyUI on the studio computer (Tailscale address); comfy_client.py, color_planes.py
+COLOR_PLANES = "auto"      # depth planes: "auto" = the areas between DEPTH JUMPS, as many as the picture has (2026-11-22, user:
+                           # "the planes are not a constant, they are found in each picture"); a number = that many depth groups;
+                           # 0 = off (the whole picture as one surface). 4 fixed groups tested: dE 10.73 -> 10.71 (no harm, no gain
+                           # in the forecast; the gain is on the sheet: no paint across a plane's edge, the edge kept sharp)
+COLOR_FIGURE_FROM_SEGMENTATION = True  # (2026-11-22) the figure = ONE plane from OneFormerRegions on ComfyUI (head, body, arms AND knees;
+COLOR_FIGURE_LABELS = "person"         # ... depth alone put the knees with the plants); these region names (comma separated) are the figure
+COLOR_DEPTH_JUMP = 0.03   # ... a depth jump = the depth changes by more than this share of the picture's depth range per mm
+                           # (mati_mahnic: 0.03 -> 17 planes, the figure apart from the fence and the leaves; 0.05 joined them)
+COLOR_PLANE_SMOOTH = (1.0, 0.5)  # smoothing factor of the farthest .. nearest plane (times COLOR_MASK_SMOOTH_MM; not below 1 mm)
+COLOR_PLANE_SMOOTH_FOCUS = 0.25  # ... the plane with the face (the figure) instead: broad stage 4 mm -> 1 mm on the figure
+COLOR_PLANE_FOCUS = 0.5    # the whole figure plane counts this much in the focus map (the face itself 1.0, COLOR_FOCUS_WEIGHT)
+COLOR_PLANE_EDGE_MM = 1.5  # along a depth break, this far on each side a pass follows the wanted spots exactly
+COLOR_PLANE_MIN_MM2 = 25.0  # plane islands smaller than this (mm2) join the plane round them
+COLOR_DEPTH_MODEL = "depth_anything_v2_vitl.pth"  # the depth model on ComfyUI
+COLOR_MARGIN_MM = 16.0     # color_paint: the picture this far from the sheet's edge. (2026-11-22: was 10, fixed in the code: the probe
+                           # ramps lie PROBE_INSET_MM 5 from the edge with a fat end up to 6.4 mm wide, and the picture's edge painted
+                           # over the top and bottom probes on the 356 x 247 sheet.) 16 = 5 + 6.4 + ~4.5 mm room
+COLOR_MASK_SMOOTH_MM = (4.0, 2.0, 1.5)  # color_paint: each pass's area is smoothed by this much (holes closed, frayed edges rounded) so strokes can be long; 0 = off (2026-11-15: pass 5 was a lace of 128 holes -> 7 mm strokes, a maze)
 COLOR_PREFER = ("opaque", "glaze", "glaze")  # per stage: of the passes that help nearly as much, which go first - "opaque" = the covering paints (an opaque
                            # UNDERPAINTING, glazes on top later), "glaze" = the light glazes (2026-11-16: glazes first left the figure thin and light
                            # while the heavy opaque green went all round it)
-COLOR_INFILL_STYLE = ("bands", "bands", "skeleton")  # color_paint: the style per stage (None = INFILL_STYLE); "bands" = long parallel strokes along each area (smoothed pass 5: median 33 mm vs skeleton 17, painterly 11)
+COLOR_INFILL_STYLE = ("bands", "bands", "bands")  # (2026-11-23: detail "skeleton" -> "bands": centre lines on AREA corrections
+                           # broke into short white dabs - the legs; bands paint the large parts in bands and the narrow ones as
+                           # centre lines anyway. The real drawing is the finish: COLOR_FINISH) (2026-11-23: detail smoothing 1.0 -> 1.5)
+                           # color_paint: the style per stage (None = INFILL_STYLE); "bands" = long parallel strokes along each area (smoothed pass 5: median 33 mm vs skeleton 17, painterly 11)
 COLOR_FILL_TRIES = 2       # FINISH A COLOUR before the next: spots of a pass that the dry photo shows unchanged get the same paint again, at most this many times (0 = off)
 COLOR_FILL_MISS = 0.3      # a spot counts as missed when it changed less than this share of what the paint should have done there
 COLOR_FILL_MIN_SHARE = 0.015  # a fill-in pass only when the missed spots are at least this share of the picture (2026-11-16: 0.004 -> 0.015, 9 fill-ins on
@@ -229,8 +285,13 @@ PLAN_WORKERS = 0           # CPU cores used for planning (0 = all, at most 8)
 DIP_MIN_MM = 70.0          # painted path before the next dip: shortest ...
 DIP_MAX_MM = 90.0        # ... and longest. Each dip picks a random distance in between. Smaller = dips more often.
 DIP_BY_WIDTH = True        # wide strokes use more paint: each painted mm counts by its width / DIP_REF_WIDTH_MM (x0.5 .. x3)
-DIP_REF_WIDTH_MM = 3.0     # at this width DIP_MIN/MAX_MM hold as they are (6 mm wide = dip after half the distance, 2 mm = 1.5x as far)
-                           # (2026-11-15: 1.5 -> 3.0, the wide glaze strokes dipped every 25-30 mm)
+DIP_REF_WIDTH_MM = 4.5     # at this width DIP_MIN/MAX_MM hold as they are (6 mm wide = dip after half the distance, 2 mm = 1.5x as far)
+                           # (2026-11-15: 1.5 -> 3.0, the wide glaze strokes dipped every 25-30 mm; 2026-11-22: 3.0 -> 4.5, user: "dips
+                           # too often" - pass 1 black 197 dips; the probe now reaches 6.4 mm, so most band strokes counted x2. Watch
+                           # for dry strokes at the end of a dip)
+THIN_OVER_BANDS = False    # (2026-11-22) "bands" infill: the centre-line strokes of the narrow parts are CUT where they run over the
+THIN_BAND_CLEAR = 0.35     # bands (a band nearer than this x the mark's width); pass 1 black of 11-22 had 60% of its area painted
+                           # 2+ times (89% of it these strokes): now 11%. True = as before
 LINE_ONE_STROKE = True     # a line is always painted in ONE stroke, never cut by a dip: a line that does not fit into the paint left gets its
                            # dip BEFORE it and is then painted to its end, even if longer than DIP_MAX_MM. False = cut at the dip, as before
                            # (2026-11-03: ko/24 had 20 lines cut by 36 dips, the long architecture lines)
@@ -275,7 +336,7 @@ RINSE_LOCK_MM = 5.0        # the container is fixed: a camera reading within thi
                            # rinse water let the reading drift 2 mm overnight, 2026-11-13); further away = it was moved, taken over
 RINSE_CLEAR_MM = 6.0      # the brush moves to, from and over the container this far above its rim
 RINSE_KEEP_OUT_MM = 8.0    # the safety check: no other move may pass lower than the rim within this distance of the container
-RINSE_PRESS_MM = 0.0       # scrubs this much deeper than that (or than the depth recorded by hand)
+RINSE_PRESS_MM = 3.0       # scrubs this much deeper than that (or than the depth recorded by hand). 2026-11-21: 0 -> 3 (user: 3 mm lower)
 RINSE_PASSES = 2           # along the slot and back, this many times (2026-11-12: 3 was more than needed)
 RINSE_BOBS = 4             # then up and down at this many spots along the slot ...
 RINSE_BOB_MM = 4.0         # ... by this much
@@ -348,6 +409,9 @@ CAMERA_HEIGHT = 1080
 CAMERA_EXPOSURE = -5
 CAMERA_BACKEND = "auto"    # auto | dshow | msmf | v4l2 | avfoundation
 CAMERA_FOURCC = "MJPG"
+CAMERA_ZOOM = 0              # (2026-11-21) the camera's own zoom / pan / tilt, SET EVERY TIME the camera opens (vision.py): another app
+CAMERA_PAN = 0               # ... (the Windows Camera) can change them and the picture then moves like a bumped camera. 0/0/0 =
+CAMERA_TILT = 0              # ... the full sensor picture (before: zoom 25, pan -129, tilt -21). None = leave the camera as it is
 CAMERA_SET_EXPOSURE = False   # True = apply CAMERA_EXPOSURE manually
 
 # canvas corners (mm) = the four calibration dots: bottom-left, bottom-right, top-right, top-left
@@ -375,7 +439,7 @@ LENS_FILE = str(BASE_DIR / "lens.json")           # the camera lens, measured ON
 CAL_DOTS_X = 6                  # dots along the paper's long side (machine Y) ...
 CAL_DOTS_Y = 5                  # ... and across it (machine X). 30 dots take about 4 minutes.
 CAL_DOT_MARGIN_MM = 15.0        # keep this far from the paper edge
-CAL_DOT_PRESS_MM = 1.0          # press this far below the contact height: a clear dot about 2 mm wide
+CAL_DOT_PRESS_MM = 1.5          # press this far below the contact height (TOUCH_Z): a clear dot. 2026-11-21: 1.0 -> 1.5 (new Z zero)
 CAL_DOT_COLOR = "auto"          # which paint dish to use: "auto" = the black dish if there is one (a dark colour shows best)
 CAL_DOTS_PER_DIP = 4            # dots per dip (the brush runs dry after a few)
 
@@ -467,6 +531,7 @@ PHOTO_EVERY_DIPS = 0           # 0 = no photo every few dips (start and final ph
 REPAIR_AT_END = True      # repair the white spots after drying (False = the job ends with the final photo)
 DRY_WAIT_MIN = 1         # wait before every photo that gets judged or repaired
 DRY_EXTEND_MIN = 5.0     # the drying countdown between colour passes: + (or P) adds this many minutes, - takes them off, Enter goes on now
+COLOR_DRY_MIN_OPAQUE = 40.0  # (2026-11-23) after a covering paint (gouache: opaque colours, whites) at least this many minutes
 COLOR_DRY_MIN = 25.0     # color_paint: minutes of drying between passes (python color_paint.py ... --dry N for one run). 2026-11-16: humid days
 COLOR_DRY_CHECK_MIN = 3.0  # ... then THE CAMERA CHECKS IT IS DRY: a photo this long before the end and one at the end; while the last pass's area
                          # still changes (wet paint dries lighter or darker), it waits this long again. 0 = no check
@@ -569,3 +634,43 @@ JUDGE_BY_DIFFERENCE = True   # the final photo is judged against the start photo
 
 # terminal
 VERBOSE = False            # False = key lines only; True = everything
+
+
+# ------------------------------------------------------------------------------------------- 2026-11-23: the end and the finish
+COLOR_END_NO_BEST = 6        # THE COLOUR IS DONE when the sheet has not got better than its best for this many passes (no pass
+                             # limit any more; run K was best at pass 30, passes 31-40 only worse). 0 = off
+COLOR_FINISH = True          # then THE FINISH (color_lines.py): edge passes along the picture's lines (TEED on ComfyUI, else a
+                             # local line drawing) where the sheet is too light there, and light accents with white; then the signature
+COLOR_LINES_SOURCE = "teed"  # "teed" (ComfyUI, cached in ko/comfy/<name>_teed.png; local when ComfyUI is off) or "local"
+COLOR_LINES_TEED_MIN = 0.5   # a TEED pixel counts as a line above this (0..1)
+COLOR_EDGE_LINE_MM = 1.2     # an edge pass's lines this wide on the sheet (the mask; the brush's width curve paints them)
+COLOR_EDGE_DL = 4.0          # a line needs a pass where its CONTRAST is missing on the sheet: the picture is darker there than round it
+                             # (COLOR_LIGHTS_AROUND_MM) by this much more (L) than the sheet is (judged along COLOR_EDGE_ALONG_MM)
+COLOR_EDGE_ALONG_MM = 3.0    # ... judged along the line over about this length, so whole lines are drawn, not specks
+COLOR_EDGE_MIN_MM = 2.0      # ... line pieces smaller than this square are left out
+COLOR_DARK_GLAZES = ("black",)  # these glazes count as dark always (the black measured weak, 0.66, on run K's sheet)
+COLOR_EDGE_PASSES_MAX = 4    # at most this many edge passes (a kind stops when its last two passes together made dE worse by
+COLOR_FINISH_MAX_LOSS = 1.0  # more than this)
+COLOR_EDGE_PAINT_LUM = 0.8   # a line is drawn with a glaze that lets through less than this (a dark one), whichever comes nearest
+COLOR_LIGHTS_DL = 6.0        # a light accent = the picture this much lighter (L) than its surroundings ...
+COLOR_LIGHTS_AROUND_MM = 3.0 # ... within about this distance
+COLOR_LIGHTS_SHEET_DL = 8.0  # ... and its contrast missing on the sheet by more than this (L)
+COLOR_LIGHT_PASSES_MAX = 3   # at most this many light passes
+COLOR_LIGHTS_FOCUS_MIN = 0.3  # lights only where the focus map is at least this (the figure 0.5, the face 1; not the hills)
+COLOR_FINISH_MIN_SHARE = 0.002  # a finishing pass only for at least this share of the picture ...
+COLOR_FINISH_MIN_GAIN = 0.04 # ... and when it brings at least this (dE, the whole picture)
+COLOR_FINISH_MIN_MM = 1.0    # pieces of a finishing pass smaller than this square are left out
+COLOR_DARK_AFTER_WHITE = 3   # NO DARK GLAZE OVER A FRESH WHITE (run K: black over the white of the pass before, 32% of it): a dark
+COLOR_DARK_GLAZE_LUM = 0.6   # glaze (one coat lets through less than this of the light) leaves out what a white got in the last 3 passes
+COLOR_LATE_OPAQUE_MAX_SHARE = 0.10  # LATE OPAQUES SMALL (run K pass 31: opaque green on 40% -> 3.8 worse): in the detail stage a
+COLOR_LATE_OPAQUE_OFF_FIGURE = False  # covering paint on at most this share, where it helps most, and off the figure's inside ...
+COLOR_LATE_OPAQUE_FIGURE_EDGE_MM = 2.0  # ... (the figure's edge this wide stays free for it)
+COLOR_KEEP_LAST_SHEET = True # a paint measured by the last sheet's PASSES keeps that value; the new test band replaces it only when
+                             # it is clearly another colour (a new mix). Before: every new run took the weaker test-band values
+COLOR_SAME_SHEET_MIN = 0.004 # pass 1 resumed: the new blank photo differs from the run before's in this .. COLOR_SAME_SHEET_MAX of
+COLOR_SAME_SHEET_MAX = 0.2   # the sheet (paint) -> the same sheet, its first blank photo stays the white reference
+COLOR_SAME_SHEET_MAX_H = 48.0
+CUP_KEEP_LOWER = True        # the brush check's "brush too high, lower" stays for the next picture (refill no longer forgets it)
+COLOR_COVER_FIRST = True     # (2026-11-23) a spot's stack of coats is planned covering paints (whites, opaques) first, glazes over
+COLOR_WHITE_NEUTRAL_C = 12.0 # a white also where the picture is whitish (chroma under this) ...
+COLOR_WHITE_NEUTRAL_DC = 8.0 # ... and the sheet more coloured than the picture by more than this

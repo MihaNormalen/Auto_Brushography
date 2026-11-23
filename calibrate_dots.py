@@ -119,7 +119,7 @@ def pick_cup(cs, color):
 def build_gcode(dots, dish, cfg, per_dip, press, dwell_ms):
     """The painter's own dip (spiral, wipe) + a vertical press for every dot. Returns the G-code lines."""
     P = PT.Painter(cfg)
-    z_dot = max(0.3, cfg["z_paint"] - press)
+    z_dot = max(float(getattr(S, "Z_MIN_MM", 0.3)) + 0.1, cfg["z_paint"] - press)
     for k, (x, y) in enumerate(dots):
         if k % per_dip == 0:
             P._dip_and_travel(x, y, dish)                       # ends above (x, y) at travel height
@@ -424,7 +424,7 @@ def main(argv=None):
         pools = V.find_pools(frame1, H, det["corners_px"])
         dish = pick_dish(pools, a.color, cfg)
     code = "\n".join(build_gcode(dots, dish, cfg, CAL_DOTS_PER_DIP, CAL_DOT_PRESS_MM, S.DOT_DWELL_MS))
-    z_dot = max(0.3, cfg["z_paint"] - CAL_DOT_PRESS_MM)
+    z_dot = max(float(getattr(S, "Z_MIN_MM", 0.3)) + 0.1, cfg["z_paint"] - CAL_DOT_PRESS_MM)
     print(f"paper {det['size_mm'][0]:.0f} x {det['size_mm'][1]:.0f} mm; {len(dots)} dots in X {rect[0]:.0f}..{rect[1]:.0f}, Y {rect[2]:.0f}..{rect[3]:.0f} "
           f"(spacing {spacing:.0f} mm); dish {a.color} at X {dish[0]:.0f} Y {dish[1]:.0f}")
     print(f"dots are pressed at machine Z {z_dot:.2f} (contact {contact:.2f} - {CAL_DOT_PRESS_MM:g} mm); a dip every {CAL_DOTS_PER_DIP} dots")

@@ -31,6 +31,7 @@ from skimage.morphology import skeletonize
 import brush_profile as BP
 import machine as mc
 import settings as S
+Z_FLOOR = float(getattr(S, "Z_MIN_MM", 0.3))   # the lowest machine Z ever sent (Z_MIN_MM; 2026-11-21: Z 0 = touch, room below)
 from vision import mm_to_px_array, px_to_mm_array, load_calibration
 
 RES = 8.0        # pixels per mm used for planning
@@ -349,7 +350,7 @@ def apply_probe(cfg, res, a):
     pf = cfg.get("paper_frame") or {}
     if pf.get("u") and pf.get("v"):
         cfg["aniso_axes"] = (tuple(pf["u"][:2]), tuple(pf["v"][:2]))
-    room = contact - 0.2                                                       # how far below the contact the machine can go (Z 0.2)
+    room = contact - Z_FLOOR                                                   # how far below the contact the machine can go (Z_MIN_MM)
     cfg["line_depth"] = round(max(min(curve[0][-1], room), 0.0), 2)
     mine = getattr(a, "from_profile", set())                                   # numbers the PROFILE put there are replaced by the measured ones; yours stay
     if a.line_depth is not None and "line_depth" not in mine:                  # your own limit (LINE_DEPTH in settings.py / --line_depth) still holds
@@ -383,7 +384,7 @@ def apply_probe(cfg, res, a):
         print(f"   brush tip: the paint lands {cfg['tool_offset'][0]:+.2f} mm in X / {cfg['tool_offset'][1]:+.2f} mm in Y from where it is told; every X / Y in this job is shifted "
               f"by the opposite, so the strokes land where the overlay shows them")
     if room < curve[0][-1] - 1e-6:
-        print(f"   WARNING: the deepest line is limited by the machine's Z 0.2: only {room:.1f} mm below the contact are possible, the widest "
+        print(f"   WARNING: the deepest line is limited by Z_MIN_MM: only {room:.1f} mm below the contact are possible, the widest "
               f"lines the brush could make ({curve[1][-1]:.2f} mm) are out of reach. A brush mounted about {curve[0][-1] - room:.1f} mm longer would give them.")
 
 
@@ -1572,6 +1573,7 @@ def plan_strokes(mask, cfg, res=RES):
                 simple.append(attach_widths(q, p, p.widths_px, step_px=max(1.0, cfg.get("point_step", 0.4) * res)))   # depth follows the width
             else:
                 simple.append(Stroke(q, "line" if kind == "thin" else "fill"))
+    simple = trim_over_bands(simple, len(bands_out), mask.shape, cfg, res)
 
     # skeleton style: a shape up to LINE_WIDTH_SLACK x the widest mark stays ONE stroke (its edges come out a bit thin);
     # only what is wider than that gets side strokes in pass 3.
@@ -1625,6 +1627,53 @@ def plan_strokes(mask, cfg, res=RES):
     simple = [q if getattr(q, "keep_turns", False) else cut_spur(q, res) for q in simple]   # no stroke goes out and comes back over itself
     simple = drop_covered_spurs(simple, mask.shape, cfg, res)
     return simple, kinds
+
+
+def trim_over_bands(simple, nb, shape, cfg, res=RES):
+    """NO CENTRE LINE OVER THE BANDS (2026-11-22, colour run, pass 1 black: 60% of the painted area got 2+ coats, 26% 3+; 89%
+    of it from the centre-line strokes of the narrow parts - the skeleton sends branches into every corner of a big area,
+    and with up to 6.4 mm width they ran over the bands already planned there: a glaze shows that as dark stripes). The
+    strokes after the first nb (the bands) are cut where their centre runs on band paint; the parts on bare paper are kept
+    (at least a short mark long), and what is still open the repair pass paints. THIN_OVER_BANDS = True: as before (no cut)."""
+    if nb <= 0 or nb >= len(simple) or bool(getattr(S, "THIN_OVER_BANDS", False)):
+        return simple
+    under = render(simple[:nb], shape, cfg["brush_w"], res)
+    under = cv2.erode(under.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0     # touching a band's edge is fine
+    to_band = cv2.distanceTransform((~under).astype(np.uint8), cv2.DIST_L2, 5)   # px from each spot to the nearest band paint
+    H, W = shape
+    min_px = max(3.0, cfg["brush_w"] * res * 0.8)
+    out = list(simple[:nb])
+    n_cut = n_drop = 0
+    for st in simple[nb:]:
+        pts = np.asarray(st, float)
+        if len(pts) < 2:
+            out.append(st); continue
+        xi = np.clip(np.round(pts[:, 0]).astype(int), 0, W - 1)
+        yi = np.clip(np.round(pts[:, 1]).astype(int), 0, H - 1)
+        w = getattr(st, "widths", None)
+        if w is not None and len(w) == len(pts):             # free = the band farther than a third of this mark's width
+            free = to_band[yi, xi] >= float(getattr(S, "THIN_BAND_CLEAR", 0.35)) * np.asarray(w, float) * res
+        else:
+            free = ~under[yi, xi]
+        if free.all():
+            out.append(st); continue
+        runs = np.flatnonzero(np.diff(np.r_[0, free.astype(int), 0]))
+        kept = 0
+        for i0, i1 in zip(runs[::2], runs[1::2]):
+            if i1 - i0 < 2 or path_length([tuple(p) for p in pts[i0:i1]]) < min_px:
+                continue
+            ns = Stroke([tuple(map(float, p)) for p in pts[i0:i1]], getattr(st, "kind", "line"))
+            for a in ("tier", "fixed_dir", "keep_turns", "group"):
+                if hasattr(st, a):
+                    setattr(ns, a, getattr(st, a))
+            if w is not None and len(w) == len(pts):
+                ns.widths = list(w[i0:i1])
+            out.append(ns); kept += 1
+        n_cut += 1
+        n_drop += kept == 0
+    if n_cut:
+        vprint(f"   {n_cut} centre-line strokes ran over the bands: cut there ({n_drop} left out entirely; THIN_OVER_BANDS)")
+    return out
 
 
 def drop_covered(strokes, cand, shape, cfg, res, share):
@@ -3582,12 +3631,12 @@ def gap_repair_gcode(frame, art, H, dip_blocks, cfg, extra_mm=0.0, persist=None)
 
     def z_of(w, extra=extra_mm):
         d = float(np.interp(min(float(w), wmax), cw, cd))
-        return max(0.3, contact - d - extra)
+        return max(Z_FLOOR + 0.1, contact - d - extra)
 
     cfg2 = dict(cfg); cfg2["outline"] = False
     cfg2["infill_style"] = "lines"                                 # small spots: plain strokes, not leaves (fewer, longer moves)
     if cfg2.get("line_depth") is None:
-        cfg2["line_depth"] = round(max(min(float(cd[-1]), contact - 0.2), 0.0), 2)
+        cfg2["line_depth"] = round(max(min(float(cd[-1]), contact - Z_FLOOR), 0.0), 2)
     # a repair stroke is landed and lifted like every line (Painter._land / _lift: gliding in and out, LINE_LEAD_IN_MM /
     # LINE_LAND_HIGH_MM), never asks for more than REPAIR_WIDTH_SHARE of the widest mark, and specks shorter than
     # REPAIR_MIN_STROKE_MM are left
@@ -4349,7 +4398,7 @@ def znudge_line(line):
         return line
     m_ = re.search(r"Z(-?[\d.]+)", line)
     if m_ and float(m_.group(1)) < zp:
-        line = line[:m_.start()] + f"Z{max(0.2, float(m_.group(1)) + dz):.3f}" + line[m_.end():]
+        line = line[:m_.start()] + f"Z{max(Z_FLOOR, float(m_.group(1)) + dz):.3f}" + line[m_.end():]
     return line
 
 
@@ -4397,8 +4446,28 @@ def stream_gcode(machine, code, cfg, preview=None, checker=None, photos=None):
     if abs(v0_) > 1e-9:
         import znudge as ZN
         print(f"znudge: the brush {ZN.say(v0_)} (python znudge.py ... to change it, also while this runs)")
+    live_p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ko", "live_status.json")
+    live_t = [0.0]
+    dips_total = table[-1][2] if table else 0
+
+    def live(i):
+        """ko/live_status.json every 2 s: where the job is (narrator_watch.py reads it). Never stops the job."""
+        if time.time() - live_t[0] < 2.0:
+            return
+        live_t[0] = time.time()
+        try:
+            import json
+            st_ = CMD_INFO[i - 1] if i - 1 < len(CMD_INFO) else ("", "", None, None, None)
+            done = cum[i - 1] if i - 1 < len(cum) else 0.0
+            json.dump({"t": time.time(), "line": i, "lines": total, "dips": table[i - 1][2], "dips_total": dips_total,
+                       "state": st_[0], "cup": st_[1], "z": st_[2], "layer": table[i - 1][1],
+                       "elapsed_s": round(time.time() - t0), "est_left_s": round(max(0.0, (cum[-1] if cum else 0.0) - done))},
+                      open(live_p, "w"))
+        except Exception:
+            pass
     try:
         for i, line in enumerate(cmds, 1):
+            live(i)
             if photos is not None and table[i - 1][2] != prev_photo_dips:
                 prev_photo_dips = table[i - 1][2]
                 if photos.due(prev_photo_dips):
@@ -4700,11 +4769,11 @@ def main(argv=None):
     if a.z_offset is not None:
         cfg["z_offset"] = a.z_offset
     if cfg["line_depth"] is None:                              # not set anywhere: ON when the Z offset gives room below, else off
-        cfg["line_depth"] = round(cfg["z_offset"] - 0.2, 2) if cfg["z_offset"] >= 0.5 else 0.0     # the whole room below the touch height (down to Z 0.2)
+        cfg["line_depth"] = round(cfg["z_offset"] - Z_FLOOR, 2) if cfg["z_offset"] - Z_FLOOR >= 0.3 else 0.0     # the whole room below the touch height (down to Z_MIN_MM)
         cfg["line_depth_auto"] = True
     if cfg["line_depth"] < 0:
         raise SystemExit("--line_depth cannot be negative")
-    room = cfg["z_offset"] - 0.2                          # how far below the touch height the machine can go (Z 0.2)
+    room = cfg["z_offset"] - Z_FLOOR                      # how far below the touch height the machine can go (Z_MIN_MM)
     if cfg["line_depth"] > room > 0:
         # also without a profile: the probe measures the real touch next and sets the depth from it (apply_probe), LINE_DEPTH
         # still the limit - stopping here on TOUCH_Z, a rough guess, refused a job the probe would have made possible (2026-11-08)
@@ -4730,8 +4799,8 @@ def main(argv=None):
     for key in ("z_paint", "z_low", "z_high", "z_wipe_exit", "dip_z"):          # machine Z = logical Z + offset
         cfg[key] += cfg["z_offset"]
     lowest = cfg["z_paint"] - cfg["line_depth"]
-    if lowest < -1e-9 or min(cfg["z_paint"], cfg["dip_z"]) < -1e-9:
-        raise SystemExit(f"the lowest Z would be {min(lowest, cfg['dip_z']):.2f} mm - below the machine's Z 0.\n"
+    if lowest < Z_FLOOR - 1e-9 or min(cfg["z_paint"], cfg["dip_z"]) < Z_FLOOR - 1e-9:
+        raise SystemExit(f"the lowest Z would be {min(lowest, cfg['dip_z']):.2f} mm - below Z_MIN_MM {Z_FLOOR:g}.\n"
                          f"  The brush needs more room below: mount it lower and use --z_offset {max(cfg['line_depth'], 0) + cfg['z_offset']:.1f} "
                          f"(or Z_OFFSET in settings.py), or use a smaller --line_depth.")
     if cfg["z_paint"] >= cfg["z_low"]:

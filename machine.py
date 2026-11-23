@@ -29,6 +29,13 @@ class LerdgeSerial:
         time.sleep(0.1); self.ser.reset_input_buffer()
         print("Connected.")
         print(f"Firmware: {self.query('M115', timeout=5)[:120]}")
+        import settings as _S                             # (2026-11-21) the controller allows only Z 0..50 (M211): its switch is set to
+        zs = float(getattr(_S, "Z_CONTROLLER_SHIFT_MM", 0.0) or 0.0)   # read Z zs (M206, applied at the next Z homing) and every
+        self.query(f"M206 Z{zs:.3f}", timeout=5)          # Z we send gets + zs: for the program Z 0 = the switch, below = negative
+        self.zshift = zs
+        if zs:
+            print(f"Z: 0 = the switch (the brush touches), down to Z_MIN_MM {float(getattr(_S, 'Z_MIN_MM', 0.0)):g}; "
+                  f"the controller gets every Z + {zs:g} (Z_CONTROLLER_SHIFT_MM)")
 
     def disconnect(self):
         if self.ser and self.ser.is_open:
@@ -36,6 +43,20 @@ class LerdgeSerial:
 
     def __enter__(self): self.connect(); return self
     def __exit__(self, *_): self.disconnect()
+
+    zshift = 0.0
+
+    def _to_controller(self, line):
+        """(2026-11-21) OUR Z -> the controller's Z: + Z_CONTROLLER_SHIFT_MM on every G0/G1 Z. The program works with Z 0 = the
+        brush touching (the Z switch) and negative Z below it; the controller allows only Z 0..50 (M211), so it gets them shifted
+        up (and M206 at connection makes its switch read that much). Nothing else is changed."""
+        if not self.zshift or "Z" not in line:
+            return line
+        head = line.split()[0].upper()
+        if head not in ("G0", "G1", "G00", "G01"):
+            return line
+        import re as _re
+        return _re.sub(r"Z(-?\d+(?:\.\d+)?)", lambda m_: f"Z{float(m_.group(1)) + self.zshift:.3f}", line, count=1)
 
     @staticmethod
     def _is_ok(raw):
@@ -53,6 +74,7 @@ class LerdgeSerial:
             line = line[:line.index(';')].strip()
         if not line:
             return ''
+        line = self._to_controller(line)
         if timeout is None:
             cmd = line.split()[0].upper()
             if cmd in ("G28", "G29", "M400", "G4"): timeout = 120

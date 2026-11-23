@@ -15,6 +15,7 @@ Nothing goes to the machine: you read the overlay and the summary first.
 import argparse, json, math, os, sys
 import cv2
 import numpy as np
+import settings as S
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -134,13 +135,13 @@ def main():
     cfg = PT.default_config()
     cfg.update({"brush_w": a.brush_min, "thin_max": a.brush_max, "cell_len_mm": (10.0, 25.0), "seed": 3,
                 "outline": False, "curve": (list(cd), list(cw)), "z_paint": a.contact,
-                "line_depth": round(max(min(cd[-1], a.contact - 0.2), 0.0), 2)})
+                "line_depth": round(max(min(cd[-1], a.contact - float(getattr(S, "Z_MIN_MM", 0.3))), 0.0), 2)})
     wmax = float(cw[-1])
 
     def depth_z(w):
         """Machine Z for a centre-line mark of width w: the depth at which the real brush makes that width (as in the job)."""
         w = min(float(w), wmax)
-        return max(0.3, a.contact - float(np.interp(w, cw, cd)))      # never below the machine's Z limit (0.3)
+        return max(float(getattr(S, "Z_MIN_MM", 0.3)) + 0.1, a.contact - float(np.interp(w, cw, cd)))      # never below Z_MIN_MM
     dip_blocks = CU.parse_strokes_full(open(a.job_gcode, encoding="utf-8", errors="ignore").read())[1]
     out = ["; ===== GAP REPAIR: only the gaps, each colour from its own dish =====",
            "G90", "G21", "M400"]

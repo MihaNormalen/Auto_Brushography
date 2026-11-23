@@ -33,3 +33,19 @@ desktop.ini
 gozd/
 demo/
 z_nudge.json
+
+# private: the artist's recorded and cloned voice, his character sheet; old probe records
+voices/
+character/
+probe_result_*.json
+# the talking brushograph (voice, talk, dictation) stays local for now
+voice.py
+voice_server.py
+voice_lab.py
+voice_clone_test.py
+talk.py
+talk_hands_free.bat
+dictate.py
+narrator_watch.py
+set_key.py
+start.bat

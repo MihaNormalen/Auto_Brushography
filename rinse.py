@@ -248,6 +248,18 @@ def choose(frame, H, H_inv, paper_poly_px, saved):
         if d <= float(_set("RINSE_LOCK_MM", 5.0)):
             print(f"rinse container: in its saved place (the camera reads it {d:.1f} mm from there; RINSE_LOCK_MM)")
             return saved
+        # THE SAME BOX READ THE OTHER WAY ROUND (2026-11-21: with the new camera view the camera put the blot pad at the wrong
+        # end - the brush scrubbed into the divider): compare the box's two outer ends, whichever part is where
+        def ends(r):
+            pts = [tuple(r["slot"][0]), tuple(r["slot"][1]), tuple(r["blot"])]
+            a_, b_ = max(((p, q) for p in pts for q in pts), key=lambda pq: math.dist(*pq))
+            return sorted([a_, b_])
+        ea, eb = ends(seen), ends(saved)
+        d_box = max(math.dist(ea[0], eb[0]), math.dist(ea[1], eb[1]))
+        if d_box <= float(_set("RINSE_LOCK_MM", 5.0)):
+            print(f"\n   *** rinse container: in its saved place, but the camera read it TURNED ROUND (blot pad at the other end). "
+                  f"The saved positions are kept (rinse.json). Look at rinse_detect.png. ***\n")
+            return saved
         print(f"rinse container: MOVED by {d:.0f} mm, the new place is used")
     if seen:
         print(f"rinse container found by the camera: slot X {seen['slot'][0][0]:.1f} Y {seen['slot'][0][1]:.1f} -> "
@@ -394,7 +406,7 @@ def _jog(m, pos, title, lines):
             continue
         pos[d[0]] += d[1] * step
         if d[0] == 2:
-            pos[2] = max(0.2, pos[2])
+            pos[2] = max(float(getattr(S, "Z_MIN_MM", 0.3)), pos[2])
             m.send_line(f"G0 Z{pos[2]:.3f} F1500")
         else:
             m.send_line(f"G0 X{pos[0]:.3f} Y{pos[1]:.3f} F3000")

@@ -270,7 +270,8 @@ def read_colours(frame, H_inv, cs, empty=None):
             filled = hsv[1] > 45 or hsv[2] < 110
         c.update({"bgr": [round(float(x), 1) for x in bgr], "lab": [round(float(x), 1) for x in lab],
                   "hue": round(float(hsv[0]), 1), "sat": round(float(hsv[1]), 1), "val": round(float(hsv[2]), 1),
-                  "filled": bool(filled), "dark": bool(filled and hsv[2] < 90 and hsv[1] < 120),
+                  "filled": bool(filled), "dark": bool(filled and hsv[2] < 90 and (hsv[1] < 120 or (    # (2026-11-21: the
+                      c.get("kind") == "opaque" and hsv[2] < 60))),     # new camera view read the black at sat 121: an OPAQUE cup this dark is black)
                   "empty_de": None if de is None else round(de, 1)})
         if c["n"] in tuple(_set("CUP_WHITE_CUPS", ())):       # white paint in a white cup: the camera cannot tell, declared
             c.update({"filled": True, "white": True, "dark": False})
@@ -333,6 +334,8 @@ def choose(frame, H, H_inv, paper_poly_px, saved=None):
                   f"cups: CUP_SHIFT_MM changed to {seen.get('shift')}: the corrected places are used")
             seen["dips"] = saved.get("dips", {})
             seen["deeper"] = saved.get("deeper", {})
+            if saved.get("lower") is not None:                  # the brush check's "too high" stays (2026-11-23: it was lost)
+                seen["lower"] = saved["lower"]
             cs = seen
     elif seen:
         cs = seen
@@ -434,8 +437,10 @@ def refill(ns=None):
     for n in ns:
         cs.setdefault("dips", {})[str(n)] = 0
         cs.setdefault("deeper", {}).pop(str(n), None)
-    if not ns or len(ns) == len(cs["cups"]):
+    if (not ns or len(ns) == len(cs["cups"])) and not bool(_set("CUP_KEEP_LOWER", True)):
         cs.pop("lower", None)                                # the brush found too high in the last run: a new run starts plain
+    # (2026-11-23, user: the corrections found while painting must carry on to the next picture - the brush's height has
+    # nothing to do with how full the cups are; CUP_KEEP_LOWER = False forgets it at every refill as before)
     save(cs)
     return ns
 

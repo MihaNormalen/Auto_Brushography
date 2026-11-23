@@ -62,7 +62,7 @@ SHEET_FILE = os.path.join(HERE, "probe_sheet.json")             # where the last
 REACH_FILE = os.path.join(HERE, "probe_reach.json")             # how far the last brush painted on one dip after the touch
 PROBE_OFFSET_MAX_MM = float(getattr(S, "PROBE_OFFSET_MAX_MM", 6.0))          # a measured tip offset larger than this is not used
 PROBE_OFFSET_SCATTER_MM = float(getattr(S, "PROBE_OFFSET_SCATTER_MM", 0.5))  # ... nor one where the lines disagree with the fit by more
-Z_MIN = 0.3                                                      # the machine is never sent below this Z
+Z_MIN = float(getattr(S, "Z_MIN_MM", 0.3))  # (Z_MIN_MM)                                                      # the machine is never sent below this Z
 
 
 # ------------------------------------------------------------------------------------------------ planning
@@ -736,7 +736,7 @@ def print_report(probes, results, sol, contact_guess):
                   f"PROBE_LINE_MM (now {PROBE_LINE_MM:g}) or a smaller PROBE_ABOVE_MM (now {PROBE_ABOVE_MM:g}) in settings.py.")
         else:
             print("\nthe touch was found on every line, but not how the width grows with depth: below the touch the lines were too short "
-                  "(the ramp ends at machine Z 0.3). Mount the brush lower, so it touches higher up.")
+                  "(the ramp ends at Z_MIN_MM). Mount the brush lower, so it touches higher up.")
         return                                                       # no result to print (2026-11-08: went on and crashed)
     elif sol is None:
         print(f"\nnot enough good lines (at least {probes_needed()}) to say where the brush touches.")

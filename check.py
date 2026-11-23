@@ -24,7 +24,7 @@ from scipy.ndimage import map_coordinates
 import settings as S
 import vision as V
 
-Z_MIN = 0.3                                                         # the machine is never sent below this Z
+Z_MIN = float(getattr(S, "Z_MIN_MM", 0.3))  # (Z_MIN_MM)                                                         # the machine is never sent below this Z
 
 
 def _s(name, default):

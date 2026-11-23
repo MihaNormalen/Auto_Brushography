@@ -1,5 +1,29 @@
 # Changes since v1.0
 
+## Colour painting, 2026-11-21 .. 23 (runs J, K and the run of 23 Nov)
+
+- **No double strokes** (`trim_over_bands`, `THIN_BAND_CLEAR`): thin centre-line strokes are cut where they would run over
+  the bands - painted twice or more 60% -> 11% of a pass. Fewer dips (`DIP_REF_WIDTH_MM` 4.5); forecast 4x faster
+  (float32, threads).
+- **Paint while it dries** (`COLOR_NO_WAIT_*`, `choose(forbid=)`): when the best pass would touch wet paint, the best pass
+  on dry or bare paper goes on at once.
+- **Depth planes from ComfyUI** (`color_planes.py`, `comfy_client.py`): Depth Anything + OneFormer segmentation; a pass is
+  smoothed inside each plane, sharp along depth breaks; the figure as one plane.
+- **The finish** (`color_lines.py`, `finish_pass`): when the colour is done, edge passes along the picture's lines (TEED)
+  where the line's contrast is missing on the sheet, and light accents in white on the figure; then the signature.
+- **No pass limit** (`COLOR_MAX_PASSES` 0, `COLOR_END_NO_BEST` 6): the run ends when it is done.
+- **White the way a brushographer uses it** (`COLOR_COVER_FIRST`, `COLOR_WHITE_NEUTRAL_*`): each spot's stack of coats is
+  planned covering paints first, glazes over them ("lift with white, then glaze"); white also where the picture is
+  whitish and the sheet too coloured; no white limit; a dark glaze never on a white of the last 3 passes.
+- **Late opaques small** (`COLOR_LATE_OPAQUE_MAX_SHARE`), **gouache dries longer** (`COLOR_DRY_MIN_OPAQUE` 40),
+  **detail stage in bands** (no more short white dabs).
+- **What carries over**: the last sheet's measured paints are kept (test bands no longer replace them), the brush check's
+  "lower" is kept (`CUP_KEEP_LOWER`), a resumed pass 1 keeps the first blank photo as the white reference.
+- **The 12-paint test sheet** (`density_test.py`): a 12 x 12 matrix of overlaps in both orders and, per paint, dabs,
+  short strokes and a zig-zag from one dip - for a colour model measured on strokes (see the notes "What the brush
+  really does" and "Deli, oblike in meje" on the website).
+- **The talking brushograph** (speech in and out, a cloned voice) was built too; it stays local for now.
+
 ## Colour painting (color_paint.py)
 
 After run H of 2026-11-19/20 (mati_mahnic, 15 passes, dE 18.7 - worse than G at the same pass; flat opaque green,

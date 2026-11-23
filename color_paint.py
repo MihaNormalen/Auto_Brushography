@@ -16,7 +16,9 @@ which goes first (COLOR_PREFER: an opaque underpainting first, glazes on top lat
 HONEST PROMISES: after every pass the camera measures what it really did against what it promised; a paint's promises count
 as much as its passes really kept (COLOR_TRUST_*), so a paint that keeps failing loses to the others.
 It ends when another pass would bring the painting less than COLOR_STOP_GAIN nearer, when the last COLOR_STOP_PATIENCE passes
-did not make the sheet better than its best (the camera's end), or after COLOR_MAX_PASSES. The last pass carries the signature.
+did not make the sheet better than its best (the camera's end), or COLOR_END_NO_BEST passes after its best (no pass limit,
+COLOR_MAX_PASSES = 0). THEN THE FINISH (2026-11-23, finish_pass, color_lines.py): edge passes along the picture's own lines
+where the sheet is too light there, and light accents in white - then a small pass with the signature.
 THE PAINT CHECK: a pass that left much of its area unchanged had too little paint: its cup is dipped deeper from then on.
 DRYING: COLOR_DRY_MIN, then the camera checks the last pass's area has stopped changing (COLOR_DRY_CHECK_MIN).
 BROAD FIRST, DETAIL LAST: the passes go through stages (COLOR_STAGE_FROM), each with its own smoothing and infill style.
@@ -53,7 +55,8 @@ import settings as S                                        # noqa: E402
 DIR = os.path.join(HERE, "ko")
 PLAN = os.path.join(DIR, "cp_plan.json")
 BLANK = os.path.join(DIR, "cp_blank.png")    # the photo of the blank sheet before pass 1: the white reference
-R_PREV = os.path.join(DIR, "cp_now.npy")      # what the sheet reflected before the last pass (what that pass did)
+BLANK_OLD = os.path.join(DIR, "cp_blank_prev.png")   # the run before's blank photo (pass 1 resumed on the same sheet?)
+R_PREV = os.path.join(DIR, "cp_now.npy")     # what the sheet reflected before the last pass (what that pass did)
 STATE = os.path.join(DIR, "cp_state.json")    # this run: what each paint really did (measured), signature painted
 MEASURED = os.path.join(DIR, "cp_measured.json")   # what each paint did on the last sheet: the start values of the next run
 SCENE = os.path.join(DIR, "cp_scene.json")  # the dishes and the rinse container, found before pass 1 and used by every pass
@@ -68,7 +71,7 @@ DRY_MIN = float(getattr(S, "COLOR_DRY_MIN", 20.0))   # drying between passes (th
 PROBE_PAINT = "black"       # the probe lines are painted with this paint: the darkest OPAQUE cup (2026-11-14: the 12-cup palette;
                             # transparent marks are too faint to measure)
 CUPS_KIND = "transparent"   # without cups.json yet: the passes dip only into the TRANSPARENT cups (paint.py --cups)
-MARGIN_MM = 10.0
+MARGIN_MM = float(getattr(S, "COLOR_MARGIN_MM", 16.0))   # the picture this far from the sheet's edge (the probes need room)
 ADAPTIVE = True             # a photo of the dry sheet before every pass, the pass chosen from it. False: chosen from the forecast
 REPAIR_PASSES = False       # no gap repair after a glaze pass: on wet, glossy, pale paint it sees glare as gaps and puts
                             # extra coats there (blotches). Later: one smart repair at the very end, from the dry painting
@@ -140,6 +143,28 @@ def setting(name, default):
     return getattr(S, name, default)
 
 
+def max_passes():
+    """COLOR_MAX_PASSES: 0 / None = no limit - the run ends when it is done (the camera: nothing helps any more), not after a
+    number of passes (user, 2026-11-23)."""
+    v = int(setting("COLOR_MAX_PASSES", 0) or 0)
+    return v if v > 0 else 10 ** 9
+
+
+# what choose() must know of the run beyond the sheet (set by paint() before every choice): recent_white = the spots a
+# white was painted on in the last COLOR_DARK_AFTER_WHITE passes; late = the detail stage; figure = the figure's inside
+_CTX = {"recent_white": None, "late": False, "figure": None}
+
+
+def lum(t):
+    return float(0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2])
+
+
+def dark_glaze(p, fac):
+    """A glaze that darkens much (the black, a dark blue): one coat lets through less than COLOR_DARK_GLAZE_LUM of the light."""
+    return not is_white(p) and (p in tuple(setting("COLOR_DARK_GLAZES", ("black",)))
+                                or lum(fac[p][0]) < float(setting("COLOR_DARK_GLAZE_LUM", 0.6)))
+
+
 _DE_NOW = [None]          # the sheet's colour error now (set by paint() before every choice)
 
 
@@ -177,6 +202,51 @@ def focus_map(img, shape_hw):
     return np.clip(out, 0, 1), len(faces)
 
 
+def _say(what, *a, **k):
+    """THE ČOPIČOGRAF SPEAKS (voice.py, 2026-11-22): a short Slovene sentence about what it does now, in the background
+    (VOICE_ON). Never stops or slows the painting. PAINT_VOICE = False: the painting says nothing (user, 2026-11-22)."""
+    if not bool(setting("PAINT_VOICE", False)):
+        return
+    try:
+        import voice
+        getattr(voice, what)(*a, **k)
+    except Exception as e:
+        print(f"   (voice: {e})")
+
+
+_PLANES = {"L": None}
+
+
+def set_planes(L, Hp, Wp, focus=None):
+    """DEPTH PLANES (color_planes.py, 2026-11-22; docs/depth_planes_comfyui.pdf): the picture sorted by depth (sky + hills,
+    fence, figure, front plants). With them choose() smooths a pass's area INSIDE each plane (nothing filled across a plane
+    border), each plane by its own amount (COLOR_PLANE_SMOOTH; the plane with the face COLOR_PLANE_SMOOTH_FOCUS), and keeps
+    it sharp along the depth breaks (like COLOR_CRISP_EDGES at lightness breaks). L = plane number per spot on the work
+    grid, or None = no planes. Returns the figure's plane number (or None)."""
+    _PLANES.clear()
+    _PLANES["L"] = L
+    if L is None:
+        return None
+    import color_planes as CPL
+    mm_px = (190.0 / max(Hp, Wp)) * Hp / L.shape[0]
+    _PLANES.update(fac=CPL.factors(L, focus), brk=CPL.breaks(L, mm_px), fig=CPL.figure_plane(L, focus))
+    fg = _PLANES["fig"]
+    print(f"color_paint: {int(L.max()) + 1} depth planes (areas between depth jumps); smoothing x{_PLANES['fac'][0]:.2g} far "
+          f".. x{_PLANES['fac'][-1]:.2g} near" + (f"; the FIGURE {100 * (L == fg).mean():.0f}% of the picture, "
+                                                  f"x{_PLANES['fac'][fg]:.2g}" if fg is not None else "; no face found"))
+    return _PLANES["fig"]
+
+
+def clean_pass(m, Hp, Wp, smooth):
+    """clean() for a pass's area: by plane when there are depth planes (set_planes), else for the whole picture."""
+    L = _PLANES.get("L")
+    sm = float(smooth if smooth is not None else per_stage("COLOR_MASK_SMOOTH_MM", 4.0, 1))
+    if L is None or L.shape != m.shape or sm <= 1.0:
+        return clean(m, Hp, Wp, smooth)
+    import color_planes as CPL
+    return CPL.clean_by_plane(m, L, sm, clean, Hp, Wp, _PLANES["fac"])
+
+
 def per_stage(name, default, n):
     """A setting that may hold one value per stage (a tuple) for the n-th pass: broad first, detail last."""
     v = setting(name, default)
@@ -204,18 +274,22 @@ def label_of(p):
 
 def lab_array(refl):
     """Linear reflectance (..., 3), the paper = 1 -> CIELAB (..., 3) (color_chart.refl_to_lab for whole arrays)."""
-    xyz = np.asarray(refl, float) @ CC.M_XYZ.T / CC.WHITE
-    f = np.where(xyz > (6 / 29) ** 3, np.cbrt(np.maximum(xyz, 0)), xyz / (3 * (6 / 29) ** 2) + 4 / 29)
+    refl = np.asarray(refl)
+    dt = np.float32 if refl.dtype == np.float32 else float            # float32 stays float32 (choose(): twice as fast)
+    xyz = refl.astype(dt, copy=False) @ (np.asarray(CC.M_XYZ, dt).T / np.asarray(CC.WHITE, dt))
+    f = np.where(xyz > dt((6 / 29) ** 3), np.cbrt(np.maximum(xyz, 0)), xyz * dt(1 / (3 * (6 / 29) ** 2)) + dt(4 / 29))
     return np.stack([116 * f[..., 1] - 16, 500 * (f[..., 0] - f[..., 1]), 200 * (f[..., 1] - f[..., 2])], axis=-1)
 
 
 def wdist(a, b, lw=1.0):
     """Colour distance (Lab) with the lightness difference counted lw times: LIGHT AND DARK FIRST (Butina, Mala likovna
     teorija: colours of the same lightness separate the picture poorly - the value structure holds it together)."""
-    d = np.asarray(a, float) - np.asarray(b, float)
+    a, b = np.asarray(a), np.asarray(b)
+    dt = np.float32 if (a.dtype == np.float32 and b.dtype == np.float32) else float
+    d = a.astype(dt, copy=False) - b.astype(dt, copy=False)
     if lw != 1.0:
-        d = d * np.array([lw, 1.0, 1.0])
-    return np.linalg.norm(d, axis=-1)
+        d = d * np.array([lw, 1.0, 1.0], dt)
+    return np.sqrt(np.einsum("...i,...i->...", d, d))
 
 
 def reachable_dark(fac, paints):
@@ -315,9 +389,12 @@ def work_shape(plan):
     return (Hp // 2, Wp // 2), (Hp, Wp)
 
 
-def clean(m, Hp, Wp, smooth=None):
-    """A pass mask without specks (on the grid it is given in), smoothed by `smooth` mm (None: the first stage's)."""
-    m = cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+def clean(m, Hp, Wp, smooth=None, min_mm=None):
+    """A pass mask without specks (on the grid it is given in), smoothed by `smooth` mm (None: the first stage's); pieces
+    smaller than min_mm square (default MIN_AREA_MM) left out."""
+    m = m.astype(np.uint8)
+    if min_mm is None:                                              # (thin lines of the finish keep their 1-pixel parts)
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     mm_px = (190.0 / max(Hp, Wp)) * Hp / m.shape[0]                 # mm per pixel of this grid (on an A4 painting)
     if smooth is None:
         smooth = per_stage("COLOR_MASK_SMOOTH_MM", 4.0, 1)
@@ -326,7 +403,7 @@ def clean(m, Hp, Wp, smooth=None):
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))   # strokes can be long (2026-11-15: the
         m = cv2.morphologyEx(cv2.morphologyEx(m, cv2.MORPH_CLOSE, k), cv2.MORPH_OPEN, k)   # lace gave 7 mm bits, a maze)
     n, lab_, st, _ = cv2.connectedComponentsWithStats(m, 8)
-    min_px = (MIN_AREA_MM / mm_px) ** 2
+    min_px = ((MIN_AREA_MM if min_mm is None else float(min_mm)) / mm_px) ** 2
     keep = np.zeros(n, bool)
     keep[1:] = st[1:, cv2.CC_STAT_AREA] >= min_px
     return keep[lab_]
@@ -346,7 +423,7 @@ def wet_zone(last, mm_px):
 
 
 def choose(now, target, done, fac, paints, Hp, Wp, stop_gain=None, smooth=None, prefer="glaze", eff=None, small=False,
-           lw=1.0, age=None, focus=None, fw=0.0, over_white=None):
+           lw=1.0, age=None, focus=None, fw=0.0, over_white=None, forbid=None, within=None, fine=False, min_share=None):
     """The next pass from the sheet as it is (now: linear, the paper = 1, on the work grid). Every spot gets the mix of coats
     still to come that brings it nearest to the target; every paint wanted somewhere is a candidate pass, its gain = how much
     nearer one coat of it brings the whole picture (dE, averaged). The best one wins, a lighter one when it is nearly as good.
@@ -362,13 +439,25 @@ def choose(now, target, done, fac, paints, Hp, Wp, stop_gain=None, smooth=None, 
     first; the fresh paint dries meanwhile and nothing smears it (2026-11-17: transparent white over wet black = grey mud).
     NO PAINT WHERE IT CANNOT HELP: larger patches inside a pass's smoothed area where its paint makes the spot worse (white
     on bare paper: 19% of the white pass of 2026-11-17) are cut out.
+    within: the pass may paint only there (the finish: the picture's lines, its light accents); fine: no smoothing, small
+    pieces kept (thin lines); min_share: the smallest pass (default MIN_SHARE).
+    NO DARK GLAZE OVER A FRESH WHITE (2026-11-23: transparent black right over the opaque white of the pass before - gouache
+    dissolves under a wet glaze, the two cancel out): a dark glaze (dark_glaze) leaves out the spots a white was painted on
+    in the last COLOR_DARK_AFTER_WHITE passes (_CTX["recent_white"]), and COLOR_GLAZE_OVER_WHITE counts only for light glazes.
+    LATE OPAQUES SMALL (2026-11-23: opaque green on 40% in the detail stage made the picture worse by 3.8): in the detail
+    stage a covering paint stays off the figure's inside (COLOR_LATE_OPAQUE_OFF_FIGURE) and paints at most
+    COLOR_LATE_OPAQUE_MAX_SHARE of the picture - the spots where it helps most.
     None = no pass helps enough (the end). Returns {paint, mask, gain (the raw promise), expect (ranking: gain x eff, with
     lightness and the wet part weighted), share}."""
+    min_share = MIN_SHARE if min_share is None else float(min_share)
     stop_gain = float(setting("COLOR_STOP_GAIN", 0.4)) if stop_gain is None else stop_gain
     cap, look = int(setting("COLOR_MAX_COATS", 6)), int(setting("COLOR_LOOK_AHEAD", 2))
     eff = eff or {}
     eff_of = lambda p_: float(eff.get(p_, eff.get("*", 1.0)))
-    usable = sorted([p for p in paints if done.get(p, 0) < cap], key=lambda p: order_key(p, fac))   # glazes, then whites on top
+    # THE STACK OF COATS IS PLANNED COVERING PAINTS FIRST, GLAZES OVER THEM (2026-11-23): white lifts, a glaze over it brings
+    # the colour back - before, the whites came last on top, so "white, then a glaze" did not exist for the planner
+    usable = sorted([p for p in paints if done.get(p, 0) < cap],
+                    key=lambda p: (0 if (is_white(p) and bool(setting("COLOR_COVER_FIRST", True))) else 1, order_key(p, fac)))
     if not usable:
         return None
     mix = int(setting("COLOR_MAX_MIX", 3))
@@ -388,9 +477,17 @@ def choose(now, target, done, fac, paints, Hp, Wp, stop_gain=None, smooth=None, 
     d_now = np.linalg.norm(lab_array(flat) - tg, axis=1)
     dw_now = wdist(lab_array(flat), tg, lw)
     best = np.empty(len(flat), int)
-    for a in range(0, len(flat), 8000):
-        d = wdist(lab_array(flat[a:a + 8000, None, :] * facs[None] + adds[None]), tg[a:a + 8000, None, :], lw) + cost[None]
-        best[a:a + 8000] = d.argmin(axis=1)
+    # every spot x every mix of coats: the slow part (2026-11-22: 64% of a forecast). In float32, the spots split over the
+    # cores (COLOR_THREADS; numpy lets go of Python's lock while it counts, so the threads really run side by side)
+    f32, t32 = flat.astype(np.float32), tg.astype(np.float32)
+    fa32, ad32, co32 = facs.astype(np.float32), adds.astype(np.float32), cost.astype(np.float32)
+
+    def _chunk(a, n=4000):
+        d = wdist(lab_array(f32[a:a + n, None, :] * fa32[None] + ad32[None]), t32[a:a + n, None, :], lw) + co32[None]
+        best[a:a + n] = d.argmin(axis=1)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(int(setting("COLOR_THREADS", 0) or os.cpu_count() or 1)) as ex_:
+        list(ex_.map(_chunk, range(0, len(flat), 4000)))
     wet = None
     wt = np.ones(len(flat))
     if focus is not None and fw > 0:
@@ -404,6 +501,9 @@ def choose(now, target, done, fac, paints, Hp, Wp, stop_gain=None, smooth=None, 
         edge = (g > float(setting("COLOR_EDGE_DL", 8.0))).astype(np.uint8)           # L per mm
         r_e = max(1, int(round(sm_ / mm_px_)))
         edge_zone = cv2.dilate(edge, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_e + 1, 2 * r_e + 1))) > 0
+    brk = _PLANES.get("brk")
+    if brk is not None and brk.shape == (H_, W_) and sm_ > 1.0:          # DEPTH BREAKS: one thing in front of another
+        edge_zone = brk if edge_zone is None else (edge_zone | brk)
     if age is not None:
         rw = setting("COLOR_RECENT_WEIGHT", (0.25, 0.6))
         rw = list(rw) if isinstance(rw, (list, tuple)) else [float(rw)]
@@ -427,12 +527,30 @@ def choose(now, target, done, fac, paints, Hp, Wp, stop_gain=None, smooth=None, 
         if is_white(p) and p.startswith("white") and bool(setting("COLOR_WHITE_ONLY_LIFTS", True)):
             # WHITE ONLY LIFTS THE VALUE (2026-11-19: run G used white 6x to dull colours the camera read stronger than the
             # picture - a milky picture): only where the sheet is darker than wanted; dulling is the glazes' work
-            m = m & (lab_array(flat)[:, 0].reshape(H_, W_) < target[..., 0] - float(setting("COLOR_WHITE_LIFT_DL", 3.0)))
+            lab_n = lab_array(flat).reshape(H_, W_, 3)
+            lifts = lab_n[..., 0] < target[..., 0] - float(setting("COLOR_WHITE_LIFT_DL", 3.0))
+            # ... or WHITISH: the picture has little colour there and the sheet clearly more (2026-11-23: the shirt chroma 19
+            # on the sheet, 8 in the picture, about as light - white was not allowed to calm it)
+            c_t, c_n = np.hypot(target[..., 1], target[..., 2]), np.hypot(lab_n[..., 1], lab_n[..., 2])
+            calms = (c_t < float(setting("COLOR_WHITE_NEUTRAL_C", 12.0))) & (c_n > c_t + float(setting("COLOR_WHITE_NEUTRAL_DC", 8.0)))
+            m = m & (lifts | calms)
+        block = forbid                                  # e.g. still wet (paint elsewhere while it dries)
+        if within is not None:
+            block = ~within if block is None else (block | ~within)
+        dark_p = dark_glaze(p, fac)
+        rw_ = _CTX.get("recent_white")
+        if dark_p and rw_ is not None and rw_.shape == m.shape:
+            block = rw_ if block is None else (block | rw_)
+        if block is not None:
+            m = m & ~block
         raw_m = m
-        m = clean(m, Hp, Wp, smooth)
-        if edge_zone is not None:                       # at the picture's edges: exactly the wanted spots
-            m = clean((m & ~edge_zone) | (raw_m & edge_zone), Hp, Wp, 1.0)
-        if m.mean() < MIN_SHARE:
+        if fine:                                        # thin lines, small accents: as they are
+            m = clean(m, Hp, Wp, 0.0, min_mm=float(setting("COLOR_FINISH_MIN_MM", 1.0)))
+        else:
+            m = clean_pass(m, Hp, Wp, smooth)
+            if edge_zone is not None:                   # at the picture's edges: exactly the wanted spots
+                m = clean((m & ~edge_zone) | (raw_m & edge_zone), Hp, Wp, 1.0)
+        if m.mean() < min_share:
             continue
         lab1 = lab_array(flat * fac[p][0] + fac[p][1])
         worse = (wdist(lab1, tg, lw) > dw_now).reshape(H_, W_) & m       # this paint makes these spots worse
@@ -441,19 +559,34 @@ def choose(now, target, done, fac, paints, Hp, Wp, stop_gain=None, smooth=None, 
         k_ = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_ + 1, 2 * r_ + 1))
         big = cv2.morphologyEx(worse.astype(np.uint8), cv2.MORPH_OPEN, k_) > 0   # the larger patches, not single strokes' edges
         if big.any():
-            m = clean(m & ~big, Hp, Wp, 1.0)
+            m = clean(m & ~big, Hp, Wp, 0.0 if fine else 1.0, min_mm=float(setting("COLOR_FINISH_MIN_MM", 1.0)) if fine else None)
         avoided = False
-        wet_p = wet if (wet is None or over_white is None or is_white(p)) else (wet & ~over_white)
+        wet_p = wet if (wet is None or over_white is None or is_white(p) or dark_p) else (wet & ~over_white)
         if wet_p is not None and (m & wet_p).any():
             m2 = clean(m & ~wet_p, Hp, Wp, 1.0)
-            if m2.mean() >= MIN_SHARE:
+            if m2.mean() >= min_share:
                 m, avoided = m2, True
-        if m.mean() < MIN_SHARE:
+        if m.mean() < min_share:
             continue
+        if _CTX.get("late") and is_white(p) and within is None:     # LATE OPAQUES SMALL
+            fg_ = _CTX.get("figure")
+            if fg_ is not None and fg_.shape == m.shape and bool(setting("COLOR_LATE_OPAQUE_OFF_FIGURE", True)):
+                m = m & ~fg_
+            cap_ = float(setting("COLOR_LATE_OPAQUE_MAX_SHARE", 0.10))
+            if m.mean() > cap_:
+                gs_ = (d_now - np.linalg.norm(lab1 - tg, axis=1)).reshape(H_, W_)
+                thr_ = float(np.quantile(gs_[m], 1.0 - cap_ / max(float(m.mean()), 1e-6)))
+                m = clean(m & (gs_ >= thr_), Hp, Wp, 1.0)
+            if m.mean() < min_share:
+                continue
+        if block is not None:                           # once more at the end: smoothing must not reach back in
+            m = m & ~block
+            if m.mean() < min_share:
+                continue
         mi = m.ravel()
         g = float((d_now[mi] - np.linalg.norm(lab1[mi] - tg[mi], axis=1)).sum() / len(flat))
         wt_p = wt
-        if ow_ is not None and not is_white(p):         # a glaze over a dry white: wanted, not put off
+        if ow_ is not None and not is_white(p) and not dark_p:   # a light glaze over a dry white: wanted, not put off
             wt_p = np.where(ow_, np.maximum(wt, 1.0) * float(setting("COLOR_GLAZE_OVER_WHITE", 1.5)), wt)
         gr = float(((dw_now[mi] - wdist(lab1[mi], tg[mi], lw)) * wt_p[mi]).sum() / len(flat))
         cands.append({"paint": p, "mask": m, "gain": g, "expect": gr * eff_of(p), "share": float(m.mean()), "avoided_wet": avoided})
@@ -495,9 +628,11 @@ def write_pass(i, plan, c):
          "share": round(c["share"], 3), "gain": round(c["gain"], 2),
          "stage": STAGE_NAMES[min(stage_of(n_real), len(STAGE_NAMES) - 1)],
          "smooth": float(c.get("smooth", per_stage("COLOR_MASK_SMOOTH_MM", 4.0, n_real))),
-         "style": per_stage("COLOR_INFILL_STYLE", None, n_real)}
+         "style": c.get("style") or per_stage("COLOR_INFILL_STYLE", None, n_real)}
     if fill:
         q["fill"] = fill
+    if c.get("kind"):                                               # a finishing pass: "edge" or "light"
+        q["kind"] = c["kind"]
     if c.get("dE") is not None:
         q["dE"] = round(float(c["dE"]), 2)
     if c.get("expect") is not None:                                 # the promise after what this paint's passes really did
@@ -576,6 +711,8 @@ def holes(now, target, fac, paints, Hp, Wp, painted=None):
     if ok.mean() < float(setting("COLOR_HOLE_MIN_SHARE", 0.003)):
         return None
     g = float(best / ok.size)
+    if g < float(setting("COLOR_HOLE_MIN_GAIN", 0.3)):  # a pass and a drying for 0.05 (2026-11-22): not worth it
+        return None
     return {"paint": bp, "mask": ok, "gain": g, "expect": g, "share": float(ok.mean()), "fill": 1, "holes": True, "smooth": 1.0}
 
 
@@ -649,10 +786,20 @@ def make(image, paints=None, dark=45.0):
             "test_room_mm": strip + float(setting("COLOR_TEST_GAP_MM", 6.0)) if strip > 0 else 0.0}
     (Hw, Ww), _ = work_shape(plan)
     target = target_lab(img, dark, (Hw, Ww))
+    import color_planes as CPL                                     # DEPTH PLANES (ComfyUI, made once per picture)
+    L_full, centres = CPL.compute(image)
+    set_planes(None if L_full is None else cv2.resize(L_full, (Ww, Hw), interpolation=cv2.INTER_NEAREST), Hp, Wp,
+               focus_map(img, (Hw, Ww)))
+    try:                                                           # THE DRAWING for the finish (TEED, made once per picture)
+        import color_lines as CL
+        lm_ = CL.line_map(image)
+        print(f"color_paint: the picture's drawing: {100 * lm_.mean():.1f}% of it on a line (for the edge passes at the end)")
+    except Exception as e:
+        print(f"(the picture's drawing not made now: {e}; it is made at the end of the run)")
     fac = {p: coat_factor(p, {}) for p in paints}
     now, done, steps, fc = np.ones((Hw, Ww, 3)), {}, [], []
     t0 = time.time()
-    while len(fc) < int(setting("COLOR_MAX_PASSES", 12)):
+    while len(fc) < min(max_passes(), 80):
         c = choose(now, target, done, fac, paints, Hp, Wp, smooth=per_stage("COLOR_MASK_SMOOTH_MM", 4.0, len(fc) + 1),
                    prefer=per_stage("COLOR_PREFER", "glaze", len(fc) + 1))
         if c is None:
@@ -666,6 +813,8 @@ def make(image, paints=None, dark=45.0):
     plan["forecast"], plan["forecast_dE"] = fc, round(de, 1)
     os.makedirs(DIR, exist_ok=True)
     archive_last_run()
+    if L_full is not None:
+        CPL.save(image, L_full, centres)
     json.dump(plan, open(PLAN, "w"), indent=1)
     sm = lambda x: cv2.resize(x, (Ww * 2 // 3, Hw * 2 // 3), interpolation=cv2.INTER_AREA)
     tiles = [sm(img)] + [sm(s) for s in steps]
@@ -1096,6 +1245,26 @@ def measure_tests(photo, plan, state, fac):
         ok, why = sane(p, t, r, pairs)
         T["sane"] = ok
         used = ok and p not in state.get("learned", {})
+        if used and bool(setting("COLOR_KEEP_LAST_SHEET", True)):
+            # WHAT THE LAST SHEET'S PASSES MEASURED GOES BEFORE A TEST STROKE (2026-11-23, user: "every new picture, the
+            # values from before are there but not used"): a test band reads weaker than a real pass (1.2-3.7x), so it
+            # replaced good pass values with worse ones at every new run. Kept - unless the band's colour is clearly another
+            # (the cup was filled with a different mix): then the band, as before (2026-11-17: the pink figure)
+            try:
+                old_ = json.load(open(MEASURED)).get(p)
+            except (OSError, ValueError):
+                old_ = None
+            if old_ and old_.get("from") != "test stroke" and _tr(old_) is not None:
+                to_, ro_ = _tr(old_)
+                c_new = lab_array((t + r)[None])[0]
+                c_old = lab_array((to_ + ro_)[None])[0]
+                ch_n, ch_o = float(np.hypot(*c_new[1:])), float(np.hypot(*c_old[1:]))
+                dh = abs((np.degrees(np.arctan2(c_new[2], c_new[1]) - np.arctan2(c_old[2], c_old[1])) + 180.0) % 360.0 - 180.0)
+                if not (ch_n > 12.0 and ch_o > 12.0 and dh > float(setting("COLOR_TEST_HUE_MAX", 40.0))):
+                    used = False
+                    print(f"   {PAINTS[p]['show']}: the last sheet's passes measured it - that value stays (its band agrees in hue)")
+                else:
+                    print(f"   {PAINTS[p]['show']}: its band is another colour than the last sheet's ({dh:.0f} deg) - a new mix: the band is used")
         if used:                                                 # no pass of it measured yet: the choice uses these
             state.setdefault("learned", {})[p] = {"t": T["t"], "r": T["r"], "from": "test stroke"}
             fac[p] = (t, r)
@@ -1239,6 +1408,7 @@ def run_pass(i, plan, extra, first=False, last=False, info=None, tests=()):
     PT.JOB_INFO = info                                               # the real paint's name and colour, the run, for the overlay
     PT.TEST_STROKES = list(tests)
     PT.TEST_ROOM_MM = float(plan.get("test_room_mm") or 0.0)
+    _say("narrate_pass", i, q["show"], q["share"], fill=bool(q.get("fill")), last=last, stage=q.get("stage"))
     print(f"\n{'=' * 100}\ncolor_paint: PASS {i}{' (the last one, with the signature)' if last else ''}: {q['show']}, "
           + (f"fill-in {q['fill']} of coat {q['coat']}" if q.get("fill") else f"coat {q['coat']}")
           + f", {100 * q['share']:.0f}% of the picture, {q.get('stage', '')} ({style or 'INFILL_STYLE'}, smooth {q.get('smooth', 0):g} mm)"
@@ -1262,7 +1432,7 @@ def job_info(i, plan, q, fac):
     the colour error before each pass."""
     c = cup_of(q["paint"])
     n_real = sum(1 for x in plan["passes"][:i] if not x.get("fill"))
-    status = (f"PASS {i} ({n_real}/{int(setting('COLOR_MAX_PASSES', 12))}) - {q['show']} - "
+    status = (f"PASS {i} ({n_real}) - {q['show']} - "
               + (f"fill-in {q['fill']}" if q.get("fill") else f"coat {q['coat']}") + f" - {100 * q['share']:.0f}% - {q.get('stage', '')}")
     t_, r_ = fac[q["paint"]]
     return {"label": label_of(q["paint"]), "coat": {"t": [float(v) for v in t_], "r": [float(v) for v in r_]},   # brush check
@@ -1281,6 +1451,7 @@ def dry_and_look(i, plan, dry_min):
     can = check > 0 and ADAPTIVE and os.path.isfile(BLANK) and os.path.isfile(PAPER)
 
     def wait(minutes, what):
+        _say("narrate_dry", minutes)
         view = DryView(i, plan)
         try:
             return CC.wait_dry(minutes, what, screen=view)
@@ -1322,7 +1493,126 @@ def check_cup(q, faint, learned):
     import cups as CUPS
     msg = CUPS.go_deeper(c["n"])
     print(f"   PAINT CHECK: pass {q['show']} left {100 * faint:.0f}% of its area unchanged -> cup {c['n']}: {msg}")
+    _say("narrate_cup", c["n"], q["show"])
     q["faint"] = round(faint, 2)
+
+
+def keep_blank_if_same_sheet():
+    """THE BLANK SHEET WHEN PASS 1 IS RESUMED (2026-11-22: "paint 1" again after a stop took the sheet WITH the aborted paint
+    as the white reference). The new blank photo against the one of the run before (kept aside as cp_blank_prev.png): the
+    sheet in the same place, most of it unchanged, and a few percent changed like paint -> the same sheet: its first,
+    really blank photo stays the reference. A fresh sheet (almost nothing changed) or one placed elsewhere keeps the new photo."""
+    if not os.path.isfile(BLANK_OLD):
+        return
+    try:
+        if time.time() - os.path.getmtime(BLANK_OLD) > 3600.0 * float(setting("COLOR_SAME_SHEET_MAX_H", 48.0)):
+            return
+        new, old = cv2.imread(BLANK), cv2.imread(BLANK_OLD)
+        if new is None or old is None or new.shape != old.shape:
+            return
+        gn, go = (cv2.GaussianBlur(cv2.cvtColor(x, cv2.COLOR_BGR2GRAY).astype(np.float32), (0, 0), 2) for x in (new, old))
+        paper = go > np.percentile(go, 60)                          # the light part of the old frame: the sheet
+        ratio = gn[paper] / np.maximum(go[paper], 1.0)
+        ratio = ratio / np.median(ratio)                            # the light of the day differs: only what changed locally
+        changed = float((np.abs(ratio - 1.0) > 0.12).mean())
+        lo, hi = float(setting("COLOR_SAME_SHEET_MIN", 0.004)), float(setting("COLOR_SAME_SHEET_MAX", 0.2))
+        if lo <= changed <= hi:
+            shutil.copyfile(BLANK_OLD, BLANK)
+            print(f"color_paint: {100 * changed:.1f}% of the sheet already painted - pass 1 RESUMED on the same sheet: its first "
+                  f"blank photo stays the white reference")
+        else:
+            print(f"color_paint: the blank sheet: {100 * changed:.1f}% differs from the last run's - a new sheet, the new photo")
+    except Exception as e:
+        print(f"(blank sheet check: {e})")
+
+
+def finish_pass(now, target, done, fac, paints, Hp, Wp, plan, eff, lw):
+    """THE FINISH (2026-11-23, user: "it should keep correcting itself, put the edges right, bring in the lights where they
+    are needed"; color_lines.py): when no colour pass helps any more, the passes that ARTICULATE the picture -
+      edge:  along the picture's own lines (TEED), only where the sheet is lighter than the picture wants there by more than
+             COLOR_EDGE_DL: the paint that brings those spots nearest (no white), as centre lines (the black method);
+      light: the picture's light accents (lighter than all round it) where the sheet is darker by more than COLOR_LIGHTS_SHEET_DL:
+             a white, small.
+    Each kind until COLOR_EDGE_PASSES_MAX / COLOR_LIGHT_PASSES_MAX, or until its last two passes together did not help (the
+    camera). The kind with fewer passes goes first, edges on a tie. -> a pass (with kind, style, smooth) or None."""
+    if not bool(setting("COLOR_FINISH", True)):
+        return None
+    H_, W_ = now.shape[:2]
+    mm_px = (190.0 / max(Hp, Wp)) * Hp / H_
+    fin = [x for x in plan["passes"] if x.get("kind") in ("edge", "light") and not x.get("fill")]
+    lmax = {"edge": int(setting("COLOR_EDGE_PASSES_MAX", 6)), "light": int(setting("COLOR_LIGHT_PASSES_MAX", 3))}
+
+    def stopped(kind):
+        xs = [x for x in fin if x["kind"] == kind]
+        if len(xs) >= lmax[kind]:
+            return True
+        r = [x.get("real") for x in xs[-2:]]
+        # a line makes form, not always a smaller colour error: the kind stops when its last two passes together made the
+        # sheet clearly WORSE (COLOR_FINISH_MAX_LOSS, the camera), not when they only did not help
+        return len(r) == 2 and None not in r and sum(r) < -float(setting("COLOR_FINISH_MAX_LOSS", 1.0))
+    import color_lines as CL
+    Lnow = lab_array(now.reshape(-1, 3))[:, 0].reshape(H_, W_)
+    dL = Lnow - target[..., 0]                                         # + = the sheet lighter than the picture
+    min_share = float(setting("COLOR_FINISH_MIN_SHARE", 0.002))
+
+    def along(m, v, mm):
+        """v averaged along the mask's own pixels within about mm (a line judged as a whole, not spot by spot)."""
+        s_ = max(1.0, mm / mm_px)
+        num = cv2.GaussianBlur(np.where(m, v, 0.0).astype(np.float32), (0, 0), s_)
+        den = cv2.GaussianBlur(m.astype(np.float32), (0, 0), s_)
+        return num / np.maximum(den, 1e-3)
+    # THE CONTRAST, NOT THE LIGHTNESS (2026-11-23, run K: the face on the sheet was DARKER than the picture, L 69 vs 82, yet
+    # without a single line - a mush of one mid value; "draw where the sheet is too light" drew nothing there). A line is
+    # missing where the picture is darker than its surroundings and the sheet is not (by COLOR_EDGE_DL); a light is missing
+    # where the picture is lighter than its surroundings and the sheet is not. That is what the eye reads as form.
+    s_ar = max(1.0, float(setting("COLOR_LIGHTS_AROUND_MM", 3.0)) / mm_px)
+    Lt = target[..., 0].astype(np.float32)
+    ct_t = cv2.GaussianBlur(Lt, (0, 0), s_ar) - Lt                     # + = darker than round it (a line), - = a light
+    ct_s = cv2.GaussianBlur(Lnow.astype(np.float32), (0, 0), s_ar) - Lnow.astype(np.float32)
+    kinds = sorted(("edge", "light"), key=lambda k: (sum(1 for x in fin if x["kind"] == k), k != "edge"))
+    for kind in kinds:
+        if stopped(kind):
+            continue
+        if kind == "edge":
+            if _CTX.get("lines") is None or _CTX["lines"].shape != (H_, W_):
+                _CTX["lines"] = CL.lines_on_grid(plan["image"], (H_, W_), mm_px)
+            ln_ = _CTX["lines"]
+            miss_ = (ct_t - ct_s) + np.maximum(dL, 0.0)                    # the line's contrast missing (+ too light overall)
+            need = ln_ & (ct_t > 1.0) & (along(ln_, miss_, float(setting("COLOR_EDGE_ALONG_MM", 3.0))) > float(setting("COLOR_EDGE_DL", 4.0)))
+            need = clean(need, Hp, Wp, 0.0, min_mm=float(setting("COLOR_EDGE_MIN_MM", 2.0)))
+            use = [p for p in paints if not is_white(p) and lum(fac[p][0]) < float(setting("COLOR_EDGE_PAINT_LUM", 0.8))]
+        else:
+            lt_ = CL.local_lights(target[..., 0], mm_px)
+            miss_ = (ct_s - ct_t) - np.minimum(dL, 0.0)                    # the light's contrast missing (+ too dark overall)
+            need = lt_ & (along(lt_, miss_, 1.5) > float(setting("COLOR_LIGHTS_SHEET_DL", 8.0)))
+            fo_ = _CTX.get("focus")                                      # the lights where the eye goes (figure, face,
+            if fo_ is not None and fo_.shape == need.shape:               # strong contrasts) - white spattered over the
+                need &= fo_ >= float(setting("COLOR_LIGHTS_FOCUS_MIN", 0.3))   # hills made them milky (test of 11-23)
+            need = clean(need, Hp, Wp, 0.0, min_mm=float(setting("COLOR_FINISH_MIN_MM", 1.0)))
+            use = [p for p in paints if p.startswith("white")]
+        if not use or need.mean() < min_share:
+            print(f"   finish: no {kind} pass needed ({100 * need.mean():.2f}% of the picture wants one)")
+            continue
+        # ONE PAINT FOR THE WHOLE DRAWING (spot by spot broke the lines into specks): of the paints that make the contrast
+        # (dark glazes for a line, whites for a light), the one whose colour comes nearest the picture there
+        flat, tg = now.reshape(-1, 3), target.reshape(-1, 3)
+        mi = need.ravel()
+        d0 = wdist(lab_array(flat[mi]), tg[mi], lw)
+        best_ = None
+        for p in use:
+            g_ = float((d0 - wdist(lab_array(flat[mi] * fac[p][0] + fac[p][1]), tg[mi], lw)).sum() / len(flat))
+            if best_ is None or g_ > best_[1]:
+                best_ = (p, g_)
+        c = {"paint": best_[0], "mask": need, "gain": best_[1], "expect": best_[1], "share": float(need.mean())} if best_ else None
+        if c is None:
+            print(f"   finish: the {kind} spots ({100 * need.mean():.1f}% of the picture) - no paint helps them enough")
+            continue
+        c.update(kind=kind, style="skeleton", smooth=0.0)
+        n_ = sum(1 for x in fin if x["kind"] == kind) + 1
+        print(f"   FINISH - {'EDGES: the picture lines where the sheet is too light' if kind == 'edge' else 'LIGHTS: the light accents the sheet lost'}"
+              f" ({kind} pass {n_} of at most {lmax[kind]}): {label_of(c['paint'])} on {100 * c['share']:.1f}% of the picture")
+        return c
+    return None
 
 
 def paint(start, extra, dry_min):
@@ -1332,10 +1622,12 @@ def paint(start, extra, dry_min):
     if "pic" not in plan or "forecast" not in plan:
         raise SystemExit("ko/cp_plan.json is from the older fixed-pass version: make it again (python color_paint.py make <picture>)")
     paints, (Hw, Ww), (Hp, Wp) = plan["paints"], *work_shape(plan)
-    max_passes = int(setting("COLOR_MAX_PASSES", 12))
+    max_passes_ = max_passes()
     fill_tries = int(setting("COLOR_FILL_TRIES", 0) or 0)
     t0 = time.time()
     if start == 1:                                                    # a new run = a new sheet: find everything again
+        if os.path.isfile(BLANK):                                     # (kept aside: pass 1 RESUMED on the same sheet)
+            shutil.copyfile(BLANK, BLANK_OLD)
         for f in (PAPER, SCENE, BLANK, R_PREV, STATE):
             if os.path.isfile(f):
                 os.remove(f)
@@ -1361,19 +1653,50 @@ def paint(start, extra, dry_min):
     _DE_NOW[0] = None
     focus, nf = focus_map(cv2.imread(plan["image"]), (Hw, Ww))
     print(f"color_paint: {nf} face(s) found in the picture: the detail passes weigh them most (COLOR_FOCUS_WEIGHT)")
+    import color_planes as CPL                                     # DEPTH PLANES (made by make; none = as before)
+    fig_p = set_planes(CPL.load((Hw, Ww), plan["image"]), Hp, Wp, (focus, nf))
+    if fig_p is not None:                                          # the whole figure counts, not only the face
+        focus = np.maximum(focus, float(setting("COLOR_PLANE_FOCUS", 0.5)) * (_PLANES["L"] == fig_p))
+        try:                                                       # the narrator says where a pass's paint goes
+            inf_ = json.load(open(CPL.INFO)); inf_["figure"] = int(fig_p); json.dump(inf_, open(CPL.INFO, "w"), indent=1)
+        except (OSError, ValueError):
+            pass
+    narrator = None
+    if bool(setting("NARRATOR_ON", True)) and bool(setting("VOICE_ON", True)):
+        try:                                                       # THE ČOPIČOGRAF TALKS while it paints (narrator_watch.py,
+            import subprocess                                      # its own program: it only reads, never disturbs the run)
+            narrator = subprocess.Popen([sys.executable, os.path.join(HERE, "narrator_watch.py")], cwd=HERE)
+        except Exception as e:
+            print(f"(narrator not started: {e})")
+    import atexit
+    atexit.register(lambda: narrator is not None and narrator.poll() is None and narrator.terminate())
+    _CTX.update(recent_white=None, late=False, figure=None, lines=None, focus=None)
+    if fig_p is not None:                                          # the figure's inside (its edges stay free for opaques)
+        mm_px0 = (190.0 / max(Hp, Wp)) * Hp / Hw
+        r0 = max(1, int(round(float(setting("COLOR_LATE_OPAQUE_FIGURE_EDGE_MM", 2.0)) / mm_px0)))
+        _CTX["figure"] = cv2.erode((_PLANES["L"] == fig_p).astype(np.uint8),
+                                   cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r0 + 1, 2 * r0 + 1))) > 0
+    _CTX["focus"] = focus
     while True:
         fac = {p: coat_factor(p, state) for p in paints}
+        rw_n = int(setting("COLOR_DARK_AFTER_WHITE", 3) or 0)        # the whites of the last passes: no dark glaze on them
+        _CTX["recent_white"] = None
+        for x in (plan["passes"][-rw_n:] if rw_n > 0 else []):
+            if x["paint"].startswith("white"):
+                mk_ = mask_of(x["picture"], (Hw, Ww))
+                _CTX["recent_white"] = mk_ if _CTX["recent_white"] is None else (_CTX["recent_white"] | mk_)
+        _CTX["late"] = stage_of(sum(1 for x in plan["passes"] if not x.get("fill")) + 1) >= 2
         fill_c = None
         de_now = None
         nowait_c = None
-        if (i > max(start, 2) and bool(setting("COLOR_NO_WAIT", True)) and ADAPTIVE and plan["passes"]
-                and not plan["passes"][-1].get("fill") and not state.get("signed")
+        if (i > start and i >= 2 and bool(setting("COLOR_NO_WAIT", True)) and ADAPTIVE and plan["passes"]
+                and not plan["passes"][-1].get("fill") and not state.get("signed") and not state.get("finishing")
                 and chain < int(setting("COLOR_NO_WAIT_CHAIN", 2))):
             # THE NEXT PASS WITHOUT WAITING when it touches only dry parts: chosen on the sheet as expected (the model), it
             # must keep COLOR_WET_MARGIN_MM away from the last pass's area; then no drying, no photo - the last pass dries
             # meanwhile and both are measured at the next photo (2026-11-18: the detail passes waited 25 min each for nothing)
             n_r = sum(1 for x in plan["passes"] if not x.get("fill"))
-            if n_r < max_passes:
+            if n_r < max_passes_:
                 ag = np.full((Hw, Ww), 99, np.int16)
                 for k_, x in enumerate(reversed(plan["passes"][-3:])):
                     mk = mask_of(x["picture"], (Hw, Ww))
@@ -1383,9 +1706,24 @@ def paint(start, extra, dry_min):
                               eff=efficiency(plan["passes"]), lw=float(per_stage("COLOR_LIGHTNESS_WEIGHT", 1.0, n_r + 1)), age=ag,
                               focus=focus, fw=float(per_stage("COLOR_FOCUS_WEIGHT", 0.0, n_r + 1)))
                 if cand is not None:
-                    wet = wet_zone(ag == 0, (190.0 / max(Hp, Wp)) * Hp / Hw)
+                    # PAINT ELSEWHERE WHILE IT DRIES (2026-11-22, user: "more than half of the sheet is still empty"): the
+                    # wet area = every pass since the last photo, grown by COLOR_NO_WAIT_GAP_MM so wet never meets wet
+                    mm_px_ = (190.0 / max(Hp, Wp)) * Hp / Hw
+                    r_ = max(1, int(round(float(setting("COLOR_NO_WAIT_GAP_MM", 1.5)) / mm_px_)))
+                    wet = cv2.dilate(((ag >= 0) & (ag <= chain)).astype(np.uint8),
+                                     cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r_ + 1, 2 * r_ + 1))) > 0
                     if not (cand["mask"] & wet).any():
                         nowait_c = cand
+                    else:                                    # the best pass that stays on dry or bare paper
+                        dry = choose(predicted, target, done_of(plan["passes"]), fac, paints, Hp, Wp,
+                                     smooth=per_stage("COLOR_MASK_SMOOTH_MM", 4.0, n_r + 1),
+                                     prefer=per_stage("COLOR_PREFER", "glaze", n_r + 1), eff=efficiency(plan["passes"]),
+                                     lw=float(per_stage("COLOR_LIGHTNESS_WEIGHT", 1.0, n_r + 1)), age=ag, focus=focus,
+                                     fw=float(per_stage("COLOR_FOCUS_WEIGHT", 0.0, n_r + 1)), forbid=wet)
+                        if dry is not None and dry["gain"] >= float(setting("COLOR_NO_WAIT_SHARE", 0.3)) * cand["gain"]:
+                            nowait_c = dry
+                            print(f"   while pass {i - 1} dries: {label_of(dry['paint'])} on the dry and bare parts "
+                                  f"({100 * dry['share']:.0f}% of the picture, {dry['gain']:.2f} vs {cand['gain']:.2f} for the best pass)")
         if nowait_c is not None:
             chain += 1
             now = predicted
@@ -1395,7 +1733,13 @@ def paint(start, extra, dry_min):
         elif i > 1:
             chain = 0
             if ADAPTIVE and os.path.isfile(BLANK) and os.path.isfile(PAPER):
-                photo = dry_and_look(i, plan, dry_min) if i > start else look_at_sheet(i)
+                dmin_ = dry_min                                # GOUACHE DRIES LONGER (2026-11-23): a covering paint since
+                since_ = plan["passes"][int(state.get("learned_upto", 0)):]   # the last photo: COLOR_DRY_MIN_OPAQUE
+                if any(is_white(x["paint"]) for x in since_):
+                    dmin_ = max(dry_min, float(setting("COLOR_DRY_MIN_OPAQUE", 40.0)))
+                    if dmin_ > dry_min:
+                        print(f"   a covering paint was painted: {dmin_:g} min of drying (COLOR_DRY_MIN_OPAQUE)")
+                photo = dry_and_look(i, plan, dmin_) if i > start else look_at_sheet(i)
                 print(f"\ncolor_paint: looking at the dry sheet before pass {i}")
                 now = sheet_now(photo, plan)
                 de_now = float(np.median(np.linalg.norm(lab_array(now) - target, axis=2)))
@@ -1529,11 +1873,6 @@ def paint(start, extra, dry_min):
             c = nowait_c
         elif fill_c is not None:
             c = fill_c
-        elif hole_c is not None:
-            c = hole_c
-            state["hole_passes"] = int(state.get("hole_passes", 0)) + 1
-            print(f"   BARE PAPER where the picture is not white: {100 * c['share']:.1f}% of the picture - "
-                  f"{label_of(c['paint'])} there first (holes pass {state['hole_passes']}, COLOR_HOLE_*)")
         elif state.get("signed"):                                      # the last real pass is painted (and its fill-ins)
             break
         else:
@@ -1551,7 +1890,7 @@ def paint(start, extra, dry_min):
             if n_white >= int(setting("COLOR_WHITE_PER_STAGE", 1)) and any(p.startswith("white") for p in use):
                 use = [p for p in use if not p.startswith("white")]   # (2026-11-20, run H: 3 white passes on 45% - a milky figure,
                 print(f"   {n_white} white pass(es) in the {st_now} stage already: no more white in it (COLOR_WHITE_PER_STAGE)")  # no glaze over it)
-            c = None if n_real >= max_passes or not use else choose(now, target, done, fac, use, Hp, Wp, smooth=smooth,
+            c = None if n_real >= max_passes_ or not use else choose(now, target, done, fac, use, Hp, Wp, smooth=smooth,
                                                                      prefer=prefer, eff=eff, lw=lw, age=age, focus=focus, fw=fw,
                                                                      over_white=over_white)
             if c is not None and not stop and bool(setting("COLOR_TRY_UNUSED", True))                     and n_real + 1 >= int(setting("COLOR_TRY_UNUSED_FROM", 3))                     and len(state.get("tried", [])) < int(setting("COLOR_TRY_UNUSED_MAX", 2)):
@@ -1580,9 +1919,38 @@ def paint(start, extra, dry_min):
                     c = cu
                     state.setdefault("tried", []).append(cu["paint"])
                     state["tried_at"] = n_real
+            # THE HOLES ONLY WHEN WORTH IT (2026-11-22, run of 11-21: four hole passes in a row on 0.7-3.6% of the picture,
+            # promising 0.05-0.15 each, while a real pass would have promised 2.7 on the 21% never painted): a holes pass
+            # only when it brings at least COLOR_HOLE_VS_REAL of what the best real pass would
+            if hole_c is not None and (c is None or hole_c["gain"] >= float(setting("COLOR_HOLE_VS_REAL", 0.5)) * c["gain"]):
+                c = hole_c
+                state["hole_passes"] = int(state.get("hole_passes", 0)) + 1
+                print(f"   BARE PAPER where the picture is not white: {100 * c['share']:.1f}% of the picture - "
+                      f"{label_of(c['paint'])} there first (holes pass {state['hole_passes']}, COLOR_HOLE_*)")
+            elif hole_c is not None:
+                print(f"   (bare-paper holes {100 * hole_c['share']:.1f}% would bring {hole_c['gain']:.2f}, the best pass "
+                      f"{c['gain']:.2f}: the real pass first, COLOR_HOLE_VS_REAL)")
             if stop and c is None:
                 print("   THE END BY THE CAMERA: no other paint helps enough either")
-            if c is None and not state.get("signed") and i > 1:           # the end, but the signature is not painted yet:
+            # THE COLOUR IS DONE when the sheet has not got better than its best for COLOR_END_NO_BEST passes (no pass limit
+            # any more, 2026-11-23: run K was best at pass 30 and passes 31-40 only made it worse) - then the finish
+            since_best = sum(1 for x in plan["passes"][bi:] if not x.get("fill")) if (plan["passes"] and best is not None) else 0
+            if (c is not None and not state.get("finishing") and int(setting("COLOR_END_NO_BEST", 6) or 0) > 0
+                    and since_best >= int(setting("COLOR_END_NO_BEST", 6))):
+                print(f"   THE COLOUR IS DONE: the sheet was best (dE {best:.1f}) after pass {bi}, the {since_best} passes since "
+                      f"did not make it better (COLOR_END_NO_BEST)")
+                c = None
+            if state.get("finishing") and c is not None and c is not hole_c:
+                c = None                                                  # in the finish: no more colour passes
+            fin_c = None
+            if c is None and not state.get("signed") and i > 1:
+                fin_c = finish_pass(now, target, done, fac, paints, Hp, Wp, plan, eff, lw)
+                if fin_c is not None and not state.get("finishing"):
+                    state["finishing"] = True
+                    print("   THE FINISH: the colour is done - now the edges and the lights (COLOR_FINISH)")
+            if fin_c is not None:
+                c, last = fin_c, False
+            elif c is None and not state.get("signed") and i > 1:         # the end, but the signature is not painted yet:
                 c = choose(now, target, done, fac, paints, Hp, Wp, stop_gain=-1e9, smooth=1.0, eff=eff, small=True, lw=lw)
                 if c is not None:                                         # one small pass with it, only where it clearly helps
                     print("   the painting is done; one more small pass (only where it clearly helps) carries the signature")
@@ -1591,9 +1959,11 @@ def paint(start, extra, dry_min):
                 last = True
             elif c is None:
                 break
+            elif bool(setting("COLOR_FINISH", True)):                     # the finish comes after it: the signature at the end
+                last = False
             else:                                                         # the signature goes with the pass expected last
                 after = apply(now, c, fac)
-                last = n_real + 1 >= max_passes or choose(after, target, {**done, c["paint"]: done.get(c["paint"], 0) + 1},
+                last = n_real + 1 >= max_passes_ or choose(after, target, {**done, c["paint"]: done.get(c["paint"], 0) + 1},
                                                           fac, paints, Hp, Wp, smooth=per_stage("COLOR_MASK_SMOOTH_MM", 4.0, n_real + 2),
                                                           prefer=per_stage("COLOR_PREFER", "glaze", n_real + 2), eff=eff,
                                                           lw=float(per_stage("COLOR_LIGHTNESS_WEIGHT", 1.0, n_real + 2))) is None
@@ -1618,6 +1988,7 @@ def paint(start, extra, dry_min):
         if i == 1 and os.path.isfile(os.path.join(HERE, "paper_frame.png")):
             # pass 1's own photo, taken before the probes and the paint: the blank sheet, the white reference from now on
             shutil.copyfile(os.path.join(HERE, "paper_frame.png"), BLANK)
+            keep_blank_if_same_sheet()
         if last:                                                          # signed: only its fill-ins may follow
             state["signed"] = True
             json.dump(state, open(STATE, "w"), indent=1)
@@ -1626,6 +1997,8 @@ def paint(start, extra, dry_min):
         i += 1
     print(f"\ncolor_paint: done, {len(plan['passes'])} passes ({(time.time() - t0) / 3600:.1f} h). "
           f"Photos: ko/cp_before_passNN.png, ko/cp_after_passNN.png")
+    _say("narrate_done", len(plan["passes"]), (time.time() - t0) / 3600)
+    time.sleep(12)                                       # the last sentence is spoken before the program ends
 
 
 def main(argv=None):
